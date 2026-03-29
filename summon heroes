@@ -11,7 +11,7 @@
   Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
 
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
-  Story: queue touch TP → MapList → StageList → story pad TP → LaunchQueue(queue Model) / SetQueue → Start (all ScreenGuis).
+  Story: Story pad (MapList) → map + stage → queue Visual/Door → LaunchQueue / SetQueue → Start. Optional skips via getgenv (see tryAutoStartStoryOnce).
   Optional: getgenv().BonusChestStoryMap; BonusChestStoryStage; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
   Story queue: blue Visual.Main; dungeon: red Main. First time each life: always one teleport to that queue (Main+Door); then no more until respawn. BonusChestStoryQueueReteleport = true to TP again when you leave the area. Story pad skips if already near pad.
   Dungeons: RaidSelect UI — each stage is a MapList row named "Dungeon" with attribute StageNum (1–3). Same Start button in that ScreenGui.
@@ -3108,7 +3108,7 @@ local function queueTeleportSkipDistance()
     return QUEUE_TELEPORT_SKIP_DIST
 end
 
---- Lobby: queue Door/Main → map + stage UI → story pad → LaunchQueue / SetQueue → Start.
+--- Lobby: Story pad (opens map UI) → map + stage → queue Door/Main → LaunchQueue / SetQueue → Start.
 local function tryAutoStartStoryOnce(mapKey, stageNum)
     if type(mapKey) ~= "string" or #mapKey == 0 then
         return false, "bad_map"
@@ -3120,30 +3120,18 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
     stageNum = math.floor(stageNum)
 
     local slotInst = resolveStoryQueueLobbySlotInstance()
-    if slotInst and not (getgenv and getgenv().BonusChestStorySkipQueueDoorTeleport == true) then
-        local reTp = getgenv and getgenv().BonusChestStoryQueueReteleport == true
-        local every = getgenv and getgenv().BonusChestStoryQueueTeleportEveryTick == true
-        local doTp = false
-        if not storyQueueLobbyTeleportUsed then
-            doTp = true
-        elseif every then
-            doTp = true
-        elseif reTp and not hrpWithinStudsOfQueueSlot(slotInst, queueTeleportSkipDistance()) then
-            doTp = true
-        end
-        if doTp then
-            local ch = LP.Character
-            if ch and ch:FindFirstChild("HumanoidRootPart") then
-                tryTeleportToQueueVisualMain(slotInst)
-                task.wait(0.15)
-                tryTeleportToQueueSlotDoor(slotInst)
-                task.wait(0.2)
-                storyQueueLobbyTeleportUsed = true
-            end
-        end
-    end
 
+    -- Map/stage UI is tied to the Story pad; queue teleport *before* picks confuses the client. Nudge pad first.
+    if not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
+        tryTeleportToStoryPad(false)
+        task.wait(0.22)
+    end
     local mapList, mapEntry = findStoryMapRow(mapKey)
+    if not (mapList and mapEntry) and not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
+        tryTeleportToStoryPad(true)
+        task.wait(0.42)
+        mapList, mapEntry = findStoryMapRow(mapKey)
+    end
     if mapList and mapEntry then
         local sg = screenGuiAncestor(mapList)
         local mapLock = mapEntry:FindFirstChild("Container", true)
@@ -3181,10 +3169,28 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
         guiActivate(stageEntry:IsA("GuiButton") and stageEntry or stageEntry:FindFirstDescendantWhichIsA("GuiButton"))
         task.wait(0.35)
 
-        -- Map + stage are set; snap to Story pad, then LaunchQueue (server expects you on the pad).
-        if not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
-            tryTeleportToStoryPad(true)
-            task.wait(0.28)
+        -- Party queue / LaunchQueue expects you at the slot (Visual + Door), not another pad snap after GUI picks.
+        if slotInst and not (getgenv and getgenv().BonusChestStorySkipQueueDoorTeleport == true) then
+            local reTp = getgenv and getgenv().BonusChestStoryQueueReteleport == true
+            local every = getgenv and getgenv().BonusChestStoryQueueTeleportEveryTick == true
+            local doTp = false
+            if not storyQueueLobbyTeleportUsed then
+                doTp = true
+            elseif every then
+                doTp = true
+            elseif reTp and not hrpWithinStudsOfQueueSlot(slotInst, queueTeleportSkipDistance()) then
+                doTp = true
+            end
+            if doTp then
+                local ch = LP.Character
+                if ch and ch:FindFirstChild("HumanoidRootPart") then
+                    tryTeleportToQueueVisualMain(slotInst)
+                    task.wait(0.15)
+                    tryTeleportToQueueSlotDoor(slotInst)
+                    task.wait(0.28)
+                    storyQueueLobbyTeleportUsed = true
+                end
+            end
         end
 
         if slotInst then
@@ -3964,7 +3970,7 @@ storyStageInputRef = TBattle:Input(
     end
 )
 
-storyStartToggleRef = TBattle:Toggle("Auto start story", "Queue TP · map · stage · pad · LaunchQueue/SetQueue · Start", saved.autoStartStory, function(on)
+storyStartToggleRef = TBattle:Toggle("Auto start story", "Story pad · map · stage · queue TP · LaunchQueue/SetQueue · Start", saved.autoStartStory, function(on)
     G.story = G.story + 1
     local g = G.story
     if on then
