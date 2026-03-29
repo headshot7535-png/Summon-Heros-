@@ -1,0 +1,190 @@
+--[[
+  Bonus chest auto-collect + NexusLib UI.
+  Game: parts tagged "BonusChestPart", ProximityPrompt under Attachment (BonusChests system).
+
+  NexusLib: optional getgenv().NexusLibPath, then readfile("NexusLib.lua"), then GitHub URLs.
+  Requires fireproximityprompt (executor).
+]]
+
+local NEXUSLIB_URLS = {
+    "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib",
+    "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib.lua",
+}
+
+local NexusLib
+if readfile and pcall then
+    local tryPaths = {}
+    if getgenv and type(getgenv().NexusLibPath) == "string" then
+        tryPaths[#tryPaths + 1] = getgenv().NexusLibPath
+    end
+    tryPaths[#tryPaths + 1] = "NexusLib.lua"
+    for _, path in ipairs(tryPaths) do
+        local ok, data = pcall(readfile, path)
+        if ok and type(data) == "string" and #data > 500 then
+            local lok, chunk = pcall(loadstring, data)
+            if lok and chunk then
+                local okm, mod = pcall(chunk)
+                if okm and mod and type(mod) == "table" and mod.Window then
+                    NexusLib = mod
+                    break
+                end
+            end
+        end
+    end
+end
+if not NexusLib then
+    for _, url in ipairs(NEXUSLIB_URLS) do
+        local ok, mod = pcall(function()
+            local src = game:HttpGet(url, true)
+            if src and #src > 100 then
+                return loadstring(src)()
+            end
+        end)
+        if ok and type(mod) == "table" and mod.Window then
+            NexusLib = mod
+            break
+        end
+    end
+end
+if not NexusLib or not NexusLib.Window then
+    error("[AutoBonusChests] NexusLib failed to load. Check HttpService / readfile.")
+end
+
+local Players = game:GetService("Players")
+local CollectionService = game:GetService("CollectionService")
+local LP = Players.LocalPlayer
+
+local function getRoot()
+    local ch = LP.Character
+    return ch and ch:FindFirstChild("HumanoidRootPart")
+end
+
+local function findChestPrompt(part)
+    if not part or not part:IsDescendantOf(workspace) then
+        return nil
+    end
+    return part:FindFirstChildWhichIsA("ProximityPrompt", true)
+end
+
+local _warnedNoFire
+local function firePrompt(prompt)
+    if not prompt or not prompt:IsA("ProximityPrompt") then
+        return false
+    end
+    local fired = false
+    if typeof(fireproximityprompt) == "function" then
+        fired = pcall(fireproximityprompt, prompt)
+    end
+    if not fired and getgenv then
+        local g = getgenv()
+        if g and typeof(g.fireproximityprompt) == "function" then
+            fired = pcall(g.fireproximityprompt, prompt)
+        end
+    end
+    if not fired and not _warnedNoFire then
+        _warnedNoFire = true
+        warn("[AutoBonusChests] fireproximityprompt not found.")
+    end
+    return fired
+end
+
+local function moveToPrompt(root, part, prompt)
+    local attach = prompt.Parent
+    local pos
+    if attach and attach:IsA("Attachment") then
+        pos = attach.WorldPosition
+    else
+        pos = part.Position
+    end
+    local maxDist = (prompt.MaxActivationDistance > 0 and prompt.MaxActivationDistance) or 8
+    local offset = (root.Position - pos).Unit * (maxDist * 0.65)
+    if offset.Magnitude < 0.1 then
+        offset = Vector3.new(0, 0, maxDist * 0.65)
+    end
+    root.CFrame = CFrame.new(pos + offset)
+end
+
+local function collectAllChests()
+    local root = getRoot()
+    if not root then
+        return 0, "No character"
+    end
+
+    local opened = 0
+    local parts = CollectionService:GetTagged("BonusChestPart")
+    table.sort(parts, function(a, b)
+        return (a.Position - root.Position).Magnitude < (b.Position - root.Position).Magnitude
+    end)
+
+    for _, part in ipairs(parts) do
+        local prompt = findChestPrompt(part)
+        if prompt and prompt.Enabled then
+            pcall(moveToPrompt, root, part, prompt)
+            task.wait(0.08)
+            if firePrompt(prompt) then
+                opened = opened + 1
+            end
+            task.wait(0.35)
+        end
+    end
+
+    return opened, nil
+end
+
+-- ── NexusLib UI ───────────────────────────────────────────────
+local Win = NexusLib:Window({ title = "Bonus Chests", width = 360, height = 420 })
+
+local T = Win:Tab("📦", "Chests")
+T:Section("Map chests")
+T:Label("Tags: BonusChestPart · needs executor fireproximityprompt.")
+
+local hint = T:Label("Ready.")
+
+local function setHint(text)
+    hint.Set(text)
+end
+
+T:Button("🎯", "Collect all now", "Teleport to each chest and open prompts", nil, function()
+    Win:Status("Opening chests…")
+    setHint("Running…")
+    task.spawn(function()
+        local n, err = collectAllChests()
+        if err then
+            Win:Status(err)
+            setHint(err)
+            Win:Notify("Chests", err, 4, "warning")
+            return
+        end
+        local msg = string.format("Fired %d prompt(s)", n)
+        Win:Status(msg)
+        setHint(msg)
+        Win:Notify("Chests", msg, 3, n > 0 and "success" or "warning")
+    end)
+end)
+
+T:Section("Automation")
+
+local loopGen = 0
+T:Toggle("Auto collect", "Retry every 2 seconds while ON", false, function(on)
+    loopGen = loopGen + 1
+    local myGen = loopGen
+    if on then
+        Win:Status("Auto chests ON")
+        task.spawn(function()
+            while myGen == loopGen do
+                local n, err = collectAllChests()
+                if err then
+                    setHint(err)
+                elseif n > 0 then
+                    setHint(("Last pass: %d opened"):format(n))
+                    Win:Status(("Auto · last %d"):format(n))
+                end
+                task.wait(2)
+            end
+        end)
+    else
+        Win:Status("Auto chests OFF")
+    end
+end)
+
+Win:Status("Bonus chests · NexusLib")
