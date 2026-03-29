@@ -1,6 +1,13 @@
 --[[
-  Summon Heroes — Auto Bonus Chests + full automation (cleaned 2026). Single NexusLib window; loop ids cancel prior tasks.
+  Summon Heroes — FULL CLEANED automation (2026). One NexusLib window (Win:Window{ title, width, height }).
+  Loop cancellation: each auto feature bumps a generation counter so the previous task.spawn loop exits (no stuck/overlapping loops).
+    • G.loop — bonus chests auto   • G.revive — auto revive   • G.ready — map ready
+    • G.story / G.dungeon — story & dungeon auto-start   • stageVoteLoopId — round-end Next / Retry vote
+    • G.fuse / G.summon / G.shop / G.statReroll / G.traitReroll / G.questClaim — units, shop, rerolls, claims
+  Toggles call persistAll(); saved toggles are restored via Toggle:Set(true) in task.defer (do not paste a second copy of this script).
+
   Bonus chest auto: optional lobby-only when workspace:GetAttribute("RoundStarted") == true (disable with getgenv().BonusChestChestsLobbyOnly = false).
+  isInLobby() == (RoundStarted ~= true); used for chest gating and available for other checks.
 
   Bonus chest auto-collect + NexusLib UI (window title: Summon Heroes).
   Game: parts tagged "BonusChestPart", ProximityPrompt under Attachment (BonusChests system).
@@ -394,12 +401,17 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LP = Players.LocalPlayer
 
---- When true (default), only run bonus-chest auto while not in-round (`RoundStarted` ~= true). Set getgenv().BonusChestChestsLobbyOnly = false to always run.
+--- Lobby if game does not mark an active round (attribute may be absent).
+local function isInLobby()
+    return workspace:GetAttribute("RoundStarted") ~= true
+end
+
+--- When true (default), only run bonus-chest auto while isInLobby(). Set getgenv().BonusChestChestsLobbyOnly = false to always run.
 local function isBonusChestLobbyForAutoCollect()
     if getgenv and getgenv().BonusChestChestsLobbyOnly == false then
         return true
     end
-    return workspace:GetAttribute("RoundStarted") ~= true
+    return isInLobby()
 end
 
 --- ReplicatedStorage.Systems or ReplicatedStorage.Remotes.Systems (game-dependent).
@@ -3976,6 +3988,7 @@ persistAll = function()
     })
 end
 
+-- Generation counters: increment on toggle change to invalidate `while myId == G.*` loops (same idea as reviveLoopId / chestLoopId in templates).
 local G = {
     loop = 0,
     revive = 0,
@@ -4276,7 +4289,7 @@ local function startStageVoteLoop()
                 if wantNext or wantRetry then
                     fireRoundEndVote(wantNext, wantRetry)
                     Win:Status(wantNext and "✅ Voted Next Stage" or "✅ Voted Retry Stage")
-                    task.wait(1.2)
+                    task.wait(1.5)
                 end
             end
             task.wait(0.35)
