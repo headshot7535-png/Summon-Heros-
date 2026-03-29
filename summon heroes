@@ -1,5 +1,5 @@
 --[[
-  Bonus chest auto-collect + NexusLib UI.
+  Bonus chest auto-collect + NexusLib UI (window title: Summon Heroes).
   Game: parts tagged "BonusChestPart", ProximityPrompt under Attachment (BonusChests system).
 
   NexusLib: optional getgenv().NexusLibPath, then readfile("NexusLib.lua"), then GitHub URLs.
@@ -11,10 +11,43 @@
   Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
 
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
+  Story: when the MAP SELECTION screen is open, Auto start story selects WaveData map key + stage index, then clicks Start (same as MapList / StageList / StartButton).
+  Optional: getgenv().BonusChestStoryMap = "VolcanoFortress"; getgenv().BonusChestStoryStage = 3
+  Dungeons: RaidSelect UI — each stage is a MapList row named "Dungeon" with attribute StageNum (1–3). Same Start button in that ScreenGui.
+  Optional: getgenv().BonusChestDungeonRaidKey = "Dungeon"; getgenv().BonusChestDungeonStage = 1
+
   Player tab (NexusLib): walk speed, infinite jump, anti-AFK (+ optional noclip / god / respawn).
+
+  Promo: Systems.PromoCodes.ClaimCode:FireServer(code). Set list via:
+    getgenv().BonusChestPromoCodes = { "CODE1", "CODE2" }  or edit PROMO_CODES_EDIT below.
+
+  Item / PvP shops: Systems.RotatingShops — BuyItem:FireServer(shopKey, slotIndex). Uses game modules for stock + CanAfford.
+  Filter: comma-separated ItemName ids (e.g. Cupcake,TraitReroll) or * for any in-stock item you can afford.
+  Optional overrides: getgenv().BonusChestRotatingShopKey, getgenv().BonusChestRotatingShopFilter (comma list or * alone).
+
+  Unit fusion: Systems.UnitFusion — PurchaseFuse:InvokeServer(mainUnit, {3× sacrifice}). Sacrifices must be in Profile.Inventory.Units (unequipped), same StarCount; main can be equipped or inventory. Game rules + coins/crystals enforced server-side.
+
+  Summon: Systems.Summon — BuyPack:FireServer(packName, amount, "Gems"|"SummonTicket"); Mythic: BuyMythicBanner:FireServer().
+  Auto-sell: Settings AutoSell_Rarity3..6 (same as SUMMON UI). After PackOpened, script sells matching units after a delay (summon animation).
+  Optional: getgenv().BonusChestSummonPack = "Pack1"; BonusChestSummonAmount; BonusChestSummonCurrency; BonusChestSummonSellDelay (seconds).
+
+  Stat reroll: Systems.UnitUpgrades — BuyStatReroll(player, unitFolder, lockedStatNames[]); then RerollAction(player, "UseNew"|"KeepCurrent"). Locks cost extra gold per stat.
+  Optional: getgenv().BonusChestStatRerollUnit; BonusChestStatRerollMode ("always"|"better"); BonusChestStatRerollMaxRolls.
+
+  Trait reroll: same UnitUpgrades — BuyTraitReroll(player, unit); confirm with TraitRerollAction or RerollAction("UseNew"|"KeepCurrent"). Until-goal mode keeps current trait if roll does not match comma-separated goals (substring).
+  Optional: getgenv().BonusChestTraitRerollUnit; BonusChestTraitRerollGoals; BonusChestTraitRerollMode ("until_goal"|"always_apply"); BonusChestTraitRerollMaxRolls.
+
+  Quests UI (Achievements / Daily): tries Systems.Quests|Achievements|Quest module ClaimAll* methods, then Systems.QuestEvent:FireServer(...). Server rejects invalid claims.
+  Optional: getgenv().BonusChestClaimQuestsIntervalSec
+
+  Player tab (NexusLib): walk speed slider + toggles persist to the same JSON when changed; re-open script restores them.
 ]]
 
 local HttpService = game:GetService("HttpService")
+
+-- Promo strings are NOT in the game bytecode dump: they live in DataStore (PromoCodeStore / CodeList).
+-- Add codes from Discord/X/updates, or set getgenv().BonusChestPromoCodes = { "..." }.
+local PROMO_CODES_EDIT = {}
 local CONFIG_FILE = (getgenv and type(getgenv().BonusChestConfigPath) == "string" and getgenv().BonusChestConfigPath)
     or "BonusChests_config.json"
 
@@ -26,6 +59,53 @@ local function loadConfig()
         autoPlayNextMap = false,
         autoRetryStage = false,
         autoReadyUp = false,
+        autoRedeemCodes = false,
+        autoStartStory = false,
+        storyMapKey = "VolcanoFortress",
+        storyStage = 3,
+        autoStartDungeon = false,
+        dungeonRaidKey = "Dungeon",
+        dungeonStage = 1,
+        autoBuyRotatingShop = false,
+        rotatingShopKey = "ItemShop",
+        rotatingShopFilter = "",
+        autoFuseUnits = false,
+        fuseMinStars = 3,
+        fuseMaxStars = 9,
+        fuseMaxFodderLevel = 0,
+        autoSummon = false,
+        summonPack = "Pack1",
+        summonAmount = 1,
+        summonCurrency = "Gems",
+        summonSellDelaySec = 12,
+        autoSellRare = false,
+        autoSellEpic = false,
+        autoSellLegendary = false,
+        autoSellMythic = false,
+        autoStatReroll = false,
+        statRerollUnitName = "",
+        statRerollLockAttack = false,
+        statRerollLockHealth = false,
+        statRerollLockCooldown = false,
+        statRerollLockSpeed = false,
+        statRerollMode = "always",
+        statRerollMaxRolls = 0,
+        statRerollDelaySec = 1.2,
+        autoTraitReroll = false,
+        traitRerollUnitName = "",
+        traitRerollGoals = "",
+        traitRerollMode = "until_goal",
+        traitRerollMaxRolls = 0,
+        traitRerollDelaySec = 1.2,
+        traitRerollSkipAnim = true,
+        autoClaimAchievements = false,
+        autoClaimDaily = false,
+        claimQuestsIntervalSec = 45,
+        playerWalkSpeed = 16,
+        playerInfiniteJump = false,
+        playerAntiAfk = false,
+        playerNoclip = false,
+        playerGodMode = false,
     }
     if not readfile then
         return defaults
@@ -57,6 +137,141 @@ local function loadConfig()
     end
     if type(data.autoReadyUp) == "boolean" then
         defaults.autoReadyUp = data.autoReadyUp
+    end
+    if type(data.autoRedeemCodes) == "boolean" then
+        defaults.autoRedeemCodes = data.autoRedeemCodes
+    end
+    if type(data.storyMapKey) == "string" and #data.storyMapKey > 0 then
+        defaults.storyMapKey = data.storyMapKey
+    end
+    if type(data.storyStage) == "number" and data.storyStage >= 1 then
+        defaults.storyStage = math.floor(data.storyStage)
+    end
+    if type(data.autoStartStory) == "boolean" then
+        defaults.autoStartStory = data.autoStartStory
+    end
+    if type(data.dungeonRaidKey) == "string" and #data.dungeonRaidKey > 0 then
+        defaults.dungeonRaidKey = data.dungeonRaidKey
+    end
+    if type(data.dungeonStage) == "number" and data.dungeonStage >= 1 then
+        defaults.dungeonStage = math.floor(data.dungeonStage)
+    end
+    if type(data.autoStartDungeon) == "boolean" then
+        defaults.autoStartDungeon = data.autoStartDungeon
+    end
+    if type(data.rotatingShopKey) == "string" and #data.rotatingShopKey > 0 then
+        defaults.rotatingShopKey = data.rotatingShopKey
+    end
+    if type(data.rotatingShopFilter) == "string" then
+        defaults.rotatingShopFilter = data.rotatingShopFilter
+    end
+    if type(data.autoBuyRotatingShop) == "boolean" then
+        defaults.autoBuyRotatingShop = data.autoBuyRotatingShop
+    end
+    if type(data.autoFuseUnits) == "boolean" then
+        defaults.autoFuseUnits = data.autoFuseUnits
+    end
+    if type(data.fuseMinStars) == "number" then
+        defaults.fuseMinStars = math.clamp(math.floor(data.fuseMinStars), 3, 9)
+    end
+    if type(data.fuseMaxStars) == "number" then
+        defaults.fuseMaxStars = math.clamp(math.floor(data.fuseMaxStars), 3, 9)
+    end
+    if type(data.fuseMaxFodderLevel) == "number" and data.fuseMaxFodderLevel >= 0 then
+        defaults.fuseMaxFodderLevel = math.floor(data.fuseMaxFodderLevel)
+    end
+    if type(data.autoSummon) == "boolean" then
+        defaults.autoSummon = data.autoSummon
+    end
+    if type(data.summonPack) == "string" and #data.summonPack > 0 then
+        defaults.summonPack = data.summonPack
+    end
+    if type(data.summonAmount) == "number" and data.summonAmount >= 1 then
+        defaults.summonAmount = math.clamp(math.floor(data.summonAmount), 1, 10)
+    end
+    if type(data.summonCurrency) == "string" and #data.summonCurrency > 0 then
+        defaults.summonCurrency = data.summonCurrency
+    end
+    if type(data.summonSellDelaySec) == "number" and data.summonSellDelaySec >= 0 then
+        defaults.summonSellDelaySec = math.floor(data.summonSellDelaySec)
+    end
+    for _, k in ipairs({
+        "autoSellRare",
+        "autoSellEpic",
+        "autoSellLegendary",
+        "autoSellMythic",
+    }) do
+        if type(data[k]) == "boolean" then
+            defaults[k] = data[k]
+        end
+    end
+    if type(data.autoStatReroll) == "boolean" then
+        defaults.autoStatReroll = data.autoStatReroll
+    end
+    if type(data.statRerollUnitName) == "string" then
+        defaults.statRerollUnitName = data.statRerollUnitName
+    end
+    for _, lk in ipairs({
+        "statRerollLockAttack",
+        "statRerollLockHealth",
+        "statRerollLockCooldown",
+        "statRerollLockSpeed",
+    }) do
+        if type(data[lk]) == "boolean" then
+            defaults[lk] = data[lk]
+        end
+    end
+    if type(data.statRerollMode) == "string" and (data.statRerollMode == "always" or data.statRerollMode == "better") then
+        defaults.statRerollMode = data.statRerollMode
+    end
+    if type(data.statRerollMaxRolls) == "number" and data.statRerollMaxRolls >= 0 then
+        defaults.statRerollMaxRolls = math.floor(data.statRerollMaxRolls)
+    end
+    if type(data.statRerollDelaySec) == "number" and data.statRerollDelaySec >= 0 then
+        defaults.statRerollDelaySec = data.statRerollDelaySec
+    end
+    if type(data.autoTraitReroll) == "boolean" then
+        defaults.autoTraitReroll = data.autoTraitReroll
+    end
+    if type(data.traitRerollUnitName) == "string" then
+        defaults.traitRerollUnitName = data.traitRerollUnitName
+    end
+    if type(data.traitRerollGoals) == "string" then
+        defaults.traitRerollGoals = data.traitRerollGoals
+    end
+    if type(data.traitRerollMode) == "string" and (data.traitRerollMode == "until_goal" or data.traitRerollMode == "always_apply") then
+        defaults.traitRerollMode = data.traitRerollMode
+    end
+    if type(data.traitRerollMaxRolls) == "number" and data.traitRerollMaxRolls >= 0 then
+        defaults.traitRerollMaxRolls = math.floor(data.traitRerollMaxRolls)
+    end
+    if type(data.traitRerollDelaySec) == "number" and data.traitRerollDelaySec >= 0 then
+        defaults.traitRerollDelaySec = data.traitRerollDelaySec
+    end
+    if type(data.traitRerollSkipAnim) == "boolean" then
+        defaults.traitRerollSkipAnim = data.traitRerollSkipAnim
+    end
+    if type(data.autoClaimAchievements) == "boolean" then
+        defaults.autoClaimAchievements = data.autoClaimAchievements
+    end
+    if type(data.autoClaimDaily) == "boolean" then
+        defaults.autoClaimDaily = data.autoClaimDaily
+    end
+    if type(data.claimQuestsIntervalSec) == "number" and data.claimQuestsIntervalSec >= 5 then
+        defaults.claimQuestsIntervalSec = math.floor(data.claimQuestsIntervalSec)
+    end
+    if type(data.playerWalkSpeed) == "number" then
+        defaults.playerWalkSpeed = math.clamp(math.floor(data.playerWalkSpeed), 0, 300)
+    end
+    for _, pk in ipairs({
+        "playerInfiniteJump",
+        "playerAntiAfk",
+        "playerNoclip",
+        "playerGodMode",
+    }) do
+        if type(data[pk]) == "boolean" then
+            defaults[pk] = data[pk]
+        end
     end
     return defaults
 end
@@ -193,6 +408,75 @@ local function playerGuiDescendantShown(name)
     return false
 end
 
+local ROUND_END_NEXT_NAMES = { "NextStageButton", "NextStage", "NextMapButton", "NextButton" }
+local ROUND_END_RETRY_NAMES = { "RestartButton", "RetryStage", "RetryButton", "Retry" }
+
+local function roundEndAnyNameVisible(names)
+    for _, n in ipairs(names) do
+        if playerGuiDescendantShown(n) then
+            return true
+        end
+    end
+    return false
+end
+
+local function labelTextIsNextStage(txt)
+    local s = string.lower(tostring(txt or ""))
+    if string.find(s, "lobby", 1, true) then
+        return false
+    end
+    local hasNext = string.find(s, "next", 1, true) ~= nil
+    local hasStageOrMap = string.find(s, "stage", 1, true) or string.find(s, "map", 1, true)
+    return hasNext and hasStageOrMap
+end
+
+local function labelTextIsRetryStage(txt)
+    local s = string.lower(tostring(txt or ""))
+    if string.find(s, "lobby", 1, true) then
+        return false
+    end
+    return string.find(s, "retry", 1, true) ~= nil
+end
+
+--- Finds a visible GuiButton whose label text matches live UI ("Next Stage", "Retry Stage", etc.).
+local function findShownGuiButtonForRoundEnd(which)
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then
+        return nil
+    end
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") then
+            local txt = d.Text
+            local ok = (which == "next" and labelTextIsNextStage(txt))
+                or (which == "retry" and labelTextIsRetryStage(txt))
+            if ok then
+                local node = d
+                while node do
+                    if node:IsA("GuiButton") and guiObjectShownOnScreen(node) then
+                        return node
+                    end
+                    node = node.Parent
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function roundEndNextUiVisible()
+    if roundEndAnyNameVisible(ROUND_END_NEXT_NAMES) then
+        return true
+    end
+    return findShownGuiButtonForRoundEnd("next") ~= nil
+end
+
+local function roundEndRetryUiVisible()
+    if roundEndAnyNameVisible(ROUND_END_RETRY_NAMES) then
+        return true
+    end
+    return findShownGuiButtonForRoundEnd("retry") ~= nil
+end
+
 local function getTryReviveRemote()
     local systems = ReplicatedStorage:FindFirstChild("Systems")
     local waves = systems and systems:FindFirstChild("Waves")
@@ -262,6 +546,1130 @@ local function fireReviveAllSlots()
     return any
 end
 
+local function collectPromoCodeStrings()
+    local out, seen = {}, {}
+    local function add(s)
+        if type(s) ~= "string" then
+            return
+        end
+        s = (s:match("^%s*(.-)%s*$") or "")
+        if #s == 0 then
+            return
+        end
+        local key = string.lower(s)
+        if seen[key] then
+            return
+        end
+        seen[key] = true
+        out[#out + 1] = s
+    end
+    if getgenv and type(getgenv().BonusChestPromoCodes) == "table" then
+        local g = getgenv().BonusChestPromoCodes
+        for _, c in ipairs(g) do
+            add(c)
+        end
+        if #out == 0 then
+            for _, c in pairs(g) do
+                add(c)
+            end
+        end
+    end
+    for _, c in ipairs(PROMO_CODES_EDIT) do
+        add(c)
+    end
+    return out
+end
+
+local function getClaimCodeRemote()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local promo = systems and systems:FindFirstChild("PromoCodes")
+    local r = promo and promo:FindFirstChild("ClaimCode")
+    if r and r:IsA("RemoteEvent") then
+        return r
+    end
+    return nil
+end
+
+local function redeemPromoCodesOnce()
+    local ev = getClaimCodeRemote()
+    if not ev then
+        return false, "no_remote"
+    end
+    local codes = collectPromoCodeStrings()
+    if #codes == 0 then
+        return false, "no_codes"
+    end
+    for _, code in ipairs(codes) do
+        pcall(function()
+            ev:FireServer(code)
+        end)
+        task.wait(0.4)
+    end
+    return true, nil
+end
+
+--- RotatingShops (Item Shop / PvP Shop): BuyItem remote + module for GetCurrentShopItems / HasStock.
+local function resolveRotatingShopsBuy()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    if not systems then
+        return nil, nil
+    end
+    local node = systems:FindFirstChild("RotatingShops")
+    if not node then
+        return nil, nil
+    end
+    local buyEv
+    local modScript
+    if node:IsA("ModuleScript") then
+        modScript = node
+        buyEv = node.Parent and node.Parent:FindFirstChild("BuyItem")
+    elseif node:IsA("Folder") then
+        modScript = node:FindFirstChild("RotatingShops") or node:FindFirstChildWhichIsA("ModuleScript")
+        buyEv = node:FindFirstChild("BuyItem")
+    end
+    if not (buyEv and buyEv:IsA("RemoteEvent") and modScript and modScript:IsA("ModuleScript")) then
+        return nil, nil
+    end
+    local ok, mod = pcall(require, modScript)
+    if not ok or type(mod) ~= "table" then
+        return nil, buyEv
+    end
+    return mod, buyEv
+end
+
+local function getCurrencyModule()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local cur = systems and systems:FindFirstChild("Currency")
+    if not cur or not cur:IsA("ModuleScript") then
+        return nil
+    end
+    local ok, m = pcall(require, cur)
+    if ok and type(m) == "table" then
+        return m
+    end
+    return nil
+end
+
+--- buyAny: true = * filter. nameSet: lower-case ItemName -> true
+local function parseRotatingShopFilter(text)
+    if type(text) ~= "string" then
+        return false, nil, "empty"
+    end
+    local s = (text:match("^%s*(.-)%s*$") or "")
+    if #s == 0 then
+        return false, nil, "empty"
+    end
+    if s == "*" then
+        return true, {}, nil
+    end
+    local set = {}
+    for part in string.gmatch(s, "[^,]+") do
+        local k = (part:match("^%s*(.-)%s*$") or "")
+        if #k > 0 then
+            set[string.lower(k)] = true
+        end
+    end
+    if next(set) == nil then
+        return false, nil, "empty"
+    end
+    return false, set, nil
+end
+
+--- Buys matching slots (1..n); ~1s between fires (matches in-game buy cooldown). Returns count, reason.
+local function tryRotatingShopAutoBuy(shopKey, filterText)
+    if type(shopKey) ~= "string" or #shopKey == 0 then
+        return 0, "bad_shop"
+    end
+    local buyAny, nameSet, ferr = parseRotatingShopFilter(filterText)
+    if ferr == "empty" then
+        return 0, "no_filter"
+    end
+    local rotMod, buyEv = resolveRotatingShopsBuy()
+    if not buyEv then
+        return 0, "no_remote"
+    end
+    if not rotMod or type(rotMod.GetCurrentShopItems) ~= "function" or type(rotMod.HasStock) ~= "function" then
+        return 0, "no_module"
+    end
+    local cur = getCurrencyModule()
+    if not cur or type(cur.CanAfford) ~= "function" then
+        return 0, "no_currency"
+    end
+    local items = rotMod:GetCurrentShopItems(shopKey)
+    if type(items) ~= "table" then
+        return 0, "no_items"
+    end
+    local bought = 0
+    for i = 1, 16 do
+        local entry = items[i]
+        if not entry then
+            break
+        end
+        local iname = entry.ItemName
+        local want = buyAny
+        if not want and type(iname) == "string" then
+            want = nameSet[string.lower(iname)] == true
+        end
+        if want and type(iname) == "string" then
+            local hasStock = select(1, rotMod:HasStock(LP, shopKey, i))
+            if hasStock then
+                local price = entry.CoinPrice or entry.GemsPrice or entry.PVPTokensPrice
+                local cType = entry.CoinPrice and "Coins" or (entry.GemsPrice and "Gems" or (entry.PVPTokensPrice and "PVPTokens"))
+                if price and cType and cur:CanAfford(LP, price, cType) then
+                    pcall(function()
+                        buyEv:FireServer(shopKey, i)
+                    end)
+                    bought = bought + 1
+                    task.wait(1.05)
+                end
+            end
+        end
+    end
+    if bought > 0 then
+        return bought, nil
+    end
+    return 0, "nothing"
+end
+
+local function getPlayerProfileFolder()
+    local pg = LP:FindFirstChild("PlayerGui")
+    return pg and pg:FindFirstChild("Profile")
+end
+
+local function getUnitFusionModule()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local node = systems and systems:FindFirstChild("UnitFusion")
+    if not node then
+        return nil
+    end
+    local modScript = node:IsA("ModuleScript") and node or node:FindFirstChildWhichIsA("ModuleScript")
+    if not modScript then
+        return nil
+    end
+    local ok, m = pcall(require, modScript)
+    if ok and type(m) == "table" then
+        return m
+    end
+    return nil
+end
+
+local function unitAttrLevel(u)
+    return tonumber(u:GetAttribute("Level")) or 0
+end
+
+local function unitAttrStars(u)
+    return tonumber(u:GetAttribute("StarCount")) or 0
+end
+
+local function unitIsLocked(u)
+    return u:GetAttribute("Locked") == true
+end
+
+--- Inventory-only fodder: same stars, not locked, lowest level first; exclude main. maxFodderLevel 0 = no cap.
+local function collectFuseFodder(invFolder, stars, excludeMain, maxFodderLevel)
+    local list = {}
+    if not invFolder then
+        return list
+    end
+    for _, u in ipairs(invFolder:GetChildren()) do
+        if u ~= excludeMain and unitAttrStars(u) == stars and not unitIsLocked(u) then
+            if not maxFodderLevel or maxFodderLevel <= 0 or unitAttrLevel(u) <= maxFodderLevel then
+                list[#list + 1] = u
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        return unitAttrLevel(a) < unitAttrLevel(b)
+    end)
+    return list
+end
+
+--- One fusion if ValidateFusion passes; main first from equipped (by level), then inventory. Returns fused, reason.
+local function tryAutoFuseOnce(opts)
+    opts = opts or {}
+    local minS = math.clamp(tonumber(opts.minStars) or 3, 3, 9)
+    local maxS = math.clamp(tonumber(opts.maxStars) or 9, 3, 9)
+    if maxS < minS then
+        maxS = minS
+    end
+    local maxFodderLv = tonumber(opts.maxFodderLevel) or 0
+
+    local profile = getPlayerProfileFolder()
+    if not profile then
+        return false, "no_profile"
+    end
+    local invRoot = profile:FindFirstChild("Inventory")
+    local invUnits = invRoot and invRoot:FindFirstChild("Units")
+    local equipped = profile:FindFirstChild("Equipped")
+    if not invUnits or not equipped then
+        return false, "no_inventory"
+    end
+
+    local fusion = getUnitFusionModule()
+    if not fusion or type(fusion.ValidateFusion) ~= "function" or type(fusion.PurchaseFuse) ~= "function" then
+        return false, "no_fusion"
+    end
+
+    local function tryMain(main)
+        if not main or not main.Parent then
+            return false
+        end
+        local stars = unitAttrStars(main)
+        if stars < minS or stars > maxS then
+            return false
+        end
+        if type(fusion.GetUpgradeInfo) == "function" and not fusion:GetUpgradeInfo(stars) then
+            return false
+        end
+        local fodder = collectFuseFodder(invUnits, stars, main, maxFodderLv)
+        if #fodder < 3 then
+            return false
+        end
+        local sac = { fodder[1], fodder[2], fodder[3] }
+        local ok = fusion:ValidateFusion(LP, main, sac)
+        if not ok then
+            return false
+        end
+        local ok2 = fusion:PurchaseFuse(LP, main, sac)
+        return ok2 == true
+    end
+
+    for stars = minS, maxS do
+        if type(fusion.GetUpgradeInfo) ~= "function" or fusion:GetUpgradeInfo(stars) then
+            local eqList = {}
+            for _, ch in ipairs(equipped:GetChildren()) do
+                if unitAttrStars(ch) == stars then
+                    eqList[#eqList + 1] = ch
+                end
+            end
+            table.sort(eqList, function(a, b)
+                return unitAttrLevel(a) > unitAttrLevel(b)
+            end)
+            for _, main in ipairs(eqList) do
+                if tryMain(main) then
+                    return true, nil
+                end
+            end
+
+            local invMains = {}
+            for _, ch in ipairs(invUnits:GetChildren()) do
+                if unitAttrStars(ch) == stars and not unitIsLocked(ch) then
+                    invMains[#invMains + 1] = ch
+                end
+            end
+            table.sort(invMains, function(a, b)
+                return unitAttrLevel(a) > unitAttrLevel(b)
+            end)
+            for _, main in ipairs(invMains) do
+                if tryMain(main) then
+                    return true, nil
+                end
+            end
+        end
+    end
+
+    return false, "no_match"
+end
+
+local function requireSystemsChildModule(folderName)
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local node = systems and systems:FindFirstChild(folderName)
+    if not node then
+        return nil
+    end
+    local modScript = node:IsA("ModuleScript") and node or node:FindFirstChildWhichIsA("ModuleScript")
+    if not modScript then
+        return nil
+    end
+    local ok, m = pcall(require, modScript)
+    if ok and type(m) == "table" then
+        return m
+    end
+    return nil
+end
+
+local function getSummonModule()
+    return requireSystemsChildModule("Summon")
+end
+
+local function getSettingsModule()
+    return requireSystemsChildModule("Settings")
+end
+
+local function getItemsModule()
+    return requireSystemsChildModule("Items")
+end
+
+local function getInventoryModule()
+    return requireSystemsChildModule("Inventory")
+end
+
+local function getUnitUpgradesModule()
+    return requireSystemsChildModule("UnitUpgrades")
+end
+
+local function getCurvesModule()
+    return requireSystemsChildModule("Curves")
+end
+
+--- Try m:Name(self, LP, ...) for common quest claim exports.
+local function pcallQuestMethod(m, methodName, ...)
+    if not m or type(m[methodName]) ~= "function" then
+        return false
+    end
+    local args = { ... }
+    local ok = pcall(function()
+        if #args == 0 then
+            m[methodName](m, LP)
+        else
+            m[methodName](m, LP, unpack(args))
+        end
+    end)
+    return ok
+end
+
+local function tryClaimQuestCategoryViaModule(m, category)
+    if category == "achievement" then
+        local names = {
+            "ClaimAllAchievements",
+            "ClaimAchievements",
+            "RedeemAllAchievements",
+            "AutoClaimAchievements",
+            "TryClaimAllAchievements",
+        }
+        for _, n in ipairs(names) do
+            if pcallQuestMethod(m, n) then
+                return true
+            end
+        end
+        if pcallQuestMethod(m, "ClaimAll", "Achievements") or pcallQuestMethod(m, "ClaimAll", "Achievement") then
+            return true
+        end
+    else
+        local names = {
+            "ClaimAllDaily",
+            "ClaimDailyRewards",
+            "RedeemAllDaily",
+            "AutoClaimDaily",
+            "TryClaimAllDaily",
+        }
+        for _, n in ipairs(names) do
+            if pcallQuestMethod(m, n) then
+                return true
+            end
+        end
+        if pcallQuestMethod(m, "ClaimAll", "Daily") then
+            return true
+        end
+    end
+    return false
+end
+
+local function tryEnumerateQuestModuleClaims(m, category)
+    local getters
+    if category == "achievement" then
+        getters = { "GetClaimableAchievements", "GetReadyAchievements", "GetCompletedAchievements" }
+    else
+        getters = { "GetClaimableDaily", "GetDailyQuests", "GetClaimableDailyQuests", "GetReadyDaily" }
+    end
+    local claimFns = { "ClaimAchievement", "ClaimQuest", "Claim", "RedeemAchievement", "ClaimDaily" }
+    for _, g in ipairs(getters) do
+        if type(m[g]) == "function" then
+            local ok, list = pcall(function()
+                return m[g](m, LP)
+            end)
+            if ok and type(list) == "table" then
+                for _, entry in ipairs(list) do
+                    local id = type(entry) == "string" and entry
+                    if type(entry) == "table" then
+                        id = entry.Id or entry.ID or entry.Name or entry.Key
+                    end
+                    if type(id) == "string" and #id > 0 then
+                        for _, cf in ipairs(claimFns) do
+                            if type(m[cf]) == "function" then
+                                pcall(function()
+                                    m[cf](m, LP, id)
+                                end)
+                                pcall(function()
+                                    m[cf](m, LP, category == "achievement" and "Achievements" or "Daily", id)
+                                end)
+                            end
+                        end
+                    end
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function tryFireQuestEventForCategory(category)
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local ev = systems and systems:FindFirstChild("QuestEvent")
+    if not (ev and ev:IsA("RemoteEvent")) then
+        return false
+    end
+    if category == "achievement" then
+        pcall(function()
+            ev:FireServer("ClaimAllAchievements")
+        end)
+        pcall(function()
+            ev:FireServer("Claim", "Achievement")
+        end)
+    else
+        pcall(function()
+            ev:FireServer("ClaimAllDaily")
+        end)
+        pcall(function()
+            ev:FireServer("Claim", "Daily")
+        end)
+    end
+    return true
+end
+
+--- Returns true if a quest module existed or QuestEvent / QuestFunction was invoked.
+local function tryClaimQuestCategoryOnce(category)
+    local used = false
+    for _, modName in ipairs({ "Quests", "Achievements", "Quest" }) do
+        local m = requireSystemsChildModule(modName)
+        if m then
+            used = true
+            tryClaimQuestCategoryViaModule(m, category)
+            tryEnumerateQuestModuleClaims(m, category)
+        end
+    end
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    if systems then
+        local rf = systems:FindFirstChild("QuestFunction") or systems:FindFirstChild("QuestInvoke")
+        if rf and rf:IsA("RemoteFunction") then
+            used = true
+            if category == "achievement" then
+                pcall(function()
+                    rf:InvokeServer("ClaimAllAchievements")
+                end)
+            else
+                pcall(function()
+                    rf:InvokeServer("ClaimAllDaily")
+                end)
+            end
+        end
+    end
+    if tryFireQuestEventForCategory(category) then
+        used = true
+    end
+    return used
+end
+
+--- Claim achievements and/or daily (in-game QUEST UI). Returns usedModuleOrRemote, reason ("no_api" if nothing to call).
+local function tryClaimAchievementsAndDailyOnce(opts)
+    opts = opts or {}
+    local wantA = opts.achievements ~= false
+    local wantD = opts.daily ~= false
+    local any = false
+    if wantA then
+        if tryClaimQuestCategoryOnce("achievement") then
+            any = true
+        end
+        task.wait(0.08)
+    end
+    if wantD then
+        if tryClaimQuestCategoryOnce("daily") then
+            any = true
+        end
+    end
+    if not any then
+        return false, "no_api"
+    end
+    return true, nil
+end
+
+local function setAutoSellRarityInGame(rarityNum, enabled)
+    local st = getSettingsModule()
+    if not st or type(st.SetConfig) ~= "function" then
+        return false
+    end
+    pcall(function()
+        st:SetConfig(LP, "AutoSell_Rarity" .. tostring(rarityNum), enabled == true)
+    end)
+    return true
+end
+
+local function trySummonOnce(packName, amount, currency)
+    local m = getSummonModule()
+    if not m then
+        return false, "no_summon"
+    end
+    if packName == "MythicBanner" then
+        if type(m.BuyMythicBanner) == "function" then
+            m:BuyMythicBanner(LP)
+        end
+        return true, nil
+    end
+    amount = math.clamp(tonumber(amount) or 1, 1, 10)
+    currency = (currency == "SummonTicket" and "SummonTicket") or "Gems"
+    if type(m.BuyPack) == "function" then
+        m:BuyPack(LP, packName, amount, currency)
+    end
+    return true, nil
+end
+
+--- summonSellDelayInputRef / saved — forward refs ok when delay fires.
+local summonSellDelayInputRef
+
+local function schedulePostSummonAutoSell(units)
+    if type(units) ~= "table" or #units == 0 then
+        return
+    end
+    local delaySec = 12
+    if getgenv and type(getgenv().BonusChestSummonSellDelay) == "number" then
+        delaySec = getgenv().BonusChestSummonSellDelay
+    elseif summonSellDelayInputRef then
+        delaySec = tonumber(summonSellDelayInputRef.Get()) or delaySec
+    else
+        delaySec = tonumber(saved.summonSellDelaySec) or delaySec
+    end
+    delaySec = math.clamp(delaySec, 0, 120)
+    local snapshot = {}
+    for _, u in ipairs(units) do
+        if typeof(u) == "Instance" then
+            snapshot[#snapshot + 1] = u
+        end
+    end
+    if #snapshot == 0 then
+        return
+    end
+    task.delay(delaySec, function()
+        local items = getItemsModule()
+        local inv = getInventoryModule()
+        local st = getSettingsModule()
+        if not items or not inv or not st then
+            return
+        end
+        if type(items.GetItemData) ~= "function" or type(inv.SellItems) ~= "function" or type(st.GetConfig) ~= "function" then
+            return
+        end
+        local toSell = {}
+        for _, u in ipairs(snapshot) do
+            if u and u.Parent then
+                local d = items:GetItemData(u.Name)
+                local r = d and d.Rarity
+                if r then
+                    local cfg = st:GetConfig(LP, "AutoSell_Rarity" .. tostring(r))
+                    if cfg and cfg.Value == true then
+                        toSell[#toSell + 1] = u
+                    end
+                end
+            end
+        end
+        if #toSell > 0 then
+            pcall(function()
+                inv:SellItems(LP, toSell)
+            end)
+        end
+    end)
+end
+
+local function hookSummonPackOpenedAutoSell()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local summ = systems and systems:FindFirstChild("Summon")
+    local pe = summ and summ:FindFirstChild("PackOpened")
+    if not pe or not pe:IsA("RemoteEvent") then
+        return
+    end
+    local g = getgenv and getgenv() or nil
+    if g and g._BonusChestPackOpenedSellConn then
+        pcall(function()
+            g._BonusChestPackOpenedSellConn:Disconnect()
+        end)
+        g._BonusChestPackOpenedSellConn = nil
+    end
+    local conn = pe.OnClientEvent:Connect(function(_, units)
+        if type(units) ~= "table" then
+            return
+        end
+        schedulePostSummonAutoSell(units)
+    end)
+    if g then
+        g._BonusChestPackOpenedSellConn = conn
+    end
+end
+
+local SUMMON_PACK_OPTIONS = {
+    { text = "Pack A", value = "Pack1" },
+    { text = "Pack B", value = "Pack2" },
+    { text = "Mythic Banner", value = "MythicBanner" },
+}
+
+local function summonPackDefaultIndex(p)
+    if p == "Pack2" then
+        return 2
+    end
+    if p == "MythicBanner" then
+        return 3
+    end
+    return 1
+end
+
+local SUMMON_CURRENCY_OPTIONS = {
+    { text = "Gems", value = "Gems" },
+    { text = "Summon Ticket", value = "SummonTicket" },
+}
+
+local function summonCurrencyDefaultIndex(c)
+    if c == "SummonTicket" then
+        return 2
+    end
+    return 1
+end
+
+--- Systems.UnitUpgrades stat reroll (REROLL STATS UI). BuyStatReroll leaves a pending roll until RerollAction.
+local STAT_REROLL_KEYS = { "Attack", "Health", "Cooldown", "Speed" }
+
+local LETTER_RANK_SCORE = {
+    D = 1,
+    C = 2,
+    B = 3,
+    A = 4,
+    S = 5,
+    X = 6,
+}
+
+local STAT_REROLL_MODE_OPTIONS = {
+    { text = "Always use new roll", value = "always" },
+    { text = "Only if better (unlocked)", value = "better" },
+}
+
+local function statRerollModeDefaultIndex(m)
+    if m == "better" then
+        return 2
+    end
+    return 1
+end
+
+local function statLetterScore(letter, curves)
+    if type(letter) ~= "string" or #letter == 0 then
+        return 0
+    end
+    local L = letter:match("^%s*(%S+)%s*$") or letter
+    if curves and type(curves.LetterMultiplier) == "function" then
+        local ok, v = pcall(function()
+            return curves:LetterMultiplier(L)
+        end)
+        if ok and type(v) == "number" then
+            return v
+        end
+    end
+    local k = string.upper(string.sub(L, 1, 1))
+    return LETTER_RANK_SCORE[k] or 0
+end
+
+local function getUnitStatLetter(unit, key)
+    if not unit then
+        return nil
+    end
+    local function isRankString(s)
+        if type(s) ~= "string" or #s == 0 then
+            return false
+        end
+        local k = string.upper(string.sub(s, 1, 1))
+        return LETTER_RANK_SCORE[k] ~= nil
+    end
+    local v = unit:GetAttribute(key)
+    if isRankString(v) then
+        return v
+    end
+    local alt = unit:GetAttribute(key .. "Letter") or unit:GetAttribute(key .. "Rank")
+    if isRankString(alt) then
+        return alt
+    end
+    return nil
+end
+
+local function buildStatRerollLockedList(lockAtk, lockHp, lockCd, lockSpd)
+    local locked = {}
+    if lockAtk then
+        locked[#locked + 1] = "Attack"
+    end
+    if lockHp then
+        locked[#locked + 1] = "Health"
+    end
+    if lockCd then
+        locked[#locked + 1] = "Cooldown"
+    end
+    if lockSpd then
+        locked[#locked + 1] = "Speed"
+    end
+    return locked
+end
+
+local function getStatRerollUnlockedKeys(lockedList)
+    local skip = {}
+    for _, k in ipairs(lockedList) do
+        skip[k] = true
+    end
+    local out = {}
+    for _, k in ipairs(STAT_REROLL_KEYS) do
+        if not skip[k] then
+            out[#out + 1] = k
+        end
+    end
+    return out
+end
+
+--- nameFilter: substring (case-insensitive) or empty for highest-level equipped, else inventory.
+local function resolveStatRerollUnit(nameFilter)
+    local profile = getPlayerProfileFolder()
+    if not profile then
+        return nil
+    end
+    local equipped = profile:FindFirstChild("Equipped")
+    local invRoot = profile:FindFirstChild("Inventory")
+    local invUnits = invRoot and invRoot:FindFirstChild("Units")
+    local filterTrim = type(nameFilter) == "string" and (nameFilter:match("^%s*(.-)%s*$") or "") or ""
+    local wantFilter = #filterTrim > 0
+
+    local function matchName(inst)
+        if not wantFilter then
+            return true
+        end
+        local nm = string.lower(inst.Name)
+        local ft = string.lower(filterTrim)
+        return nm == ft or string.find(nm, ft, 1, true) ~= nil
+    end
+
+    local best = nil
+    local function consider(u)
+        if not u or not u.Parent then
+            return
+        end
+        if not matchName(u) then
+            return
+        end
+        if not best or unitAttrLevel(u) > unitAttrLevel(best) then
+            best = u
+        end
+    end
+
+    if equipped then
+        for _, u in ipairs(equipped:GetChildren()) do
+            consider(u)
+        end
+    end
+    if invUnits then
+        for _, u in ipairs(invUnits:GetChildren()) do
+            consider(u)
+        end
+    end
+    if best then
+        return best
+    end
+    if wantFilter then
+        return nil
+    end
+
+    if equipped then
+        local eq = {}
+        for _, u in ipairs(equipped:GetChildren()) do
+            eq[#eq + 1] = u
+        end
+        table.sort(eq, function(a, b)
+            return unitAttrLevel(a) > unitAttrLevel(b)
+        end)
+        if eq[1] then
+            return eq[1]
+        end
+    end
+    if invUnits then
+        local inv = {}
+        for _, u in ipairs(invUnits:GetChildren()) do
+            if not unitIsLocked(u) then
+                inv[#inv + 1] = u
+            end
+        end
+        table.sort(inv, function(a, b)
+            return unitAttrLevel(a) > unitAttrLevel(b)
+        end)
+        if inv[1] then
+            return inv[1]
+        end
+    end
+    return nil
+end
+
+--- Returns ok, reason where reason: used_new, kept, buy_failed, no_module, no_unit, no_match, all_locked
+local function tryStatRerollOnce(opts)
+    opts = opts or {}
+    local upgrades = getUnitUpgradesModule()
+    if not upgrades or type(upgrades.BuyStatReroll) ~= "function" or type(upgrades.RerollAction) ~= "function" then
+        return false, "no_module"
+    end
+
+    local nameFilter = opts.unitNameFilter
+    if getgenv and type(getgenv().BonusChestStatRerollUnit) == "string" and #getgenv().BonusChestStatRerollUnit > 0 then
+        nameFilter = getgenv().BonusChestStatRerollUnit
+    end
+
+    local unit = resolveStatRerollUnit(nameFilter)
+    if not unit then
+        local trim = type(nameFilter) == "string" and (nameFilter:match("^%s*(.-)%s*$") or "") or ""
+        if #trim > 0 then
+            return false, "no_match"
+        end
+        return false, "no_unit"
+    end
+
+    local locked = buildStatRerollLockedList(opts.lockAtk, opts.lockHp, opts.lockCd, opts.lockSpd)
+    local unlocked = getStatRerollUnlockedKeys(locked)
+    if #unlocked == 0 then
+        return false, "all_locked"
+    end
+
+    local curves = getCurvesModule()
+    local mode = opts.mode or "always"
+    if getgenv and (getgenv().BonusChestStatRerollMode == "better" or getgenv().BonusChestStatRerollMode == "always") then
+        mode = getgenv().BonusChestStatRerollMode
+    end
+
+    local function sumUnlockedLetters(letterTable, useUnit)
+        local s = 0
+        for _, k in ipairs(unlocked) do
+            local L
+            if useUnit then
+                L = getUnitStatLetter(unit, k)
+            else
+                L = letterTable and letterTable[k]
+            end
+            s = s + statLetterScore(L, curves)
+        end
+        return s
+    end
+
+    local oldSum = sumUnlockedLetters(nil, true)
+
+    local newStats
+    local okBuy, ret = pcall(function()
+        return upgrades:BuyStatReroll(LP, unit, locked)
+    end)
+    if not okBuy or ret == nil or type(ret) ~= "table" then
+        return false, "buy_failed"
+    end
+    newStats = ret
+
+    local useNew = true
+    if mode == "better" then
+        local newSum = sumUnlockedLetters(newStats, false)
+        useNew = newSum > oldSum
+    end
+
+    pcall(function()
+        upgrades:RerollAction(LP, useNew and "UseNew" or "KeepCurrent")
+    end)
+
+    return true, useNew and "used_new" or "kept"
+end
+
+local TRAIT_REROLL_MODE_OPTIONS = {
+    { text = "Until goal trait (comma list)", value = "until_goal" },
+    { text = "Always apply new roll", value = "always_apply" },
+}
+
+local function traitRerollModeDefaultIndex(m)
+    if m == "always_apply" then
+        return 2
+    end
+    return 1
+end
+
+local function parseCommaGoals(str)
+    local out = {}
+    if type(str) ~= "string" then
+        return out
+    end
+    for piece in string.gmatch(str, "[^,]+") do
+        local t = piece:match("^%s*(.-)%s*$")
+        if t and #t > 0 then
+            out[#out + 1] = t
+        end
+    end
+    return out
+end
+
+local function getUnitTraitDisplayName(unit)
+    if not unit then
+        return ""
+    end
+    for _, key in ipairs({ "Trait", "TraitName", "UnitTrait", "TraitId" }) do
+        local v = unit:GetAttribute(key)
+        if type(v) == "string" and #v > 0 then
+            return v
+        end
+        if type(v) == "number" then
+            return tostring(v)
+        end
+    end
+    return ""
+end
+
+local function parseTraitFromRerollResult(ret)
+    if type(ret) == "string" and #ret > 0 then
+        return ret
+    end
+    if type(ret) == "table" then
+        local k = ret.TraitName or ret.Name or ret.Trait or ret.NewTrait or ret.DisplayName
+        if type(k) == "string" and #k > 0 then
+            return k
+        end
+        if type(k) == "number" then
+            return tostring(k)
+        end
+        for _, v in pairs(ret) do
+            if type(v) == "string" and #v > 2 and not string.match(v, "^%d+$") then
+                return v
+            end
+        end
+    end
+    return ""
+end
+
+local function traitNameMatchesGoals(traitName, goals)
+    if type(traitName) ~= "string" or #traitName == 0 then
+        return false
+    end
+    local tn = string.lower(traitName)
+    for _, g in ipairs(goals) do
+        if type(g) == "string" and #g > 0 then
+            local gl = string.lower(g)
+            if string.find(tn, gl, 1, true) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function trySetSkipTraitRerollAnim(enabled)
+    local st = getSettingsModule()
+    if not st or type(st.SetConfig) ~= "function" then
+        return
+    end
+    local on = enabled == true
+    for _, key in ipairs({
+        "SkipTraitRerollAnim",
+        "TraitRerollSkipAnim",
+        "SkipTraitAnim",
+        "RerollTraitSkipAnim",
+    }) do
+        pcall(function()
+            st:SetConfig(LP, key, on)
+        end)
+    end
+end
+
+--- Pick trait buy + confirm (TraitRerollAction, RerollTraitAction, or shared RerollAction).
+local function resolveTraitRerollFunctions(upgrades)
+    if not upgrades then
+        return nil, nil
+    end
+    local pairsToTry = {
+        { upgrades.BuyTraitReroll, upgrades.TraitRerollAction },
+        { upgrades.PurchaseTraitReroll, upgrades.TraitRerollAction },
+        { upgrades.BuyTraitReroll, upgrades.RerollTraitAction },
+        { upgrades.PurchaseTraitReroll, upgrades.RerollTraitAction },
+        { upgrades.BuyTraitReroll, upgrades.RerollAction },
+        { upgrades.PurchaseTraitReroll, upgrades.RerollAction },
+    }
+    for _, pr in ipairs(pairsToTry) do
+        local buyFn, actFn = pr[1], pr[2]
+        if type(buyFn) == "function" and type(actFn) == "function" then
+            return buyFn, actFn
+        end
+    end
+    return nil, nil
+end
+
+--- Returns ok, reason: goal_met, discarded, used_new, buy_failed, no_module, no_unit, no_match, no_goals, already_goal, bad_roll
+local function tryTraitRerollOnce(opts)
+    opts = opts or {}
+    local upgrades = getUnitUpgradesModule()
+    local buyFn, actFn = resolveTraitRerollFunctions(upgrades)
+    if not buyFn or not actFn then
+        return false, "no_module"
+    end
+
+    local nameFilter = opts.unitNameFilter
+    if getgenv and type(getgenv().BonusChestTraitRerollUnit) == "string" and #getgenv().BonusChestTraitRerollUnit > 0 then
+        nameFilter = getgenv().BonusChestTraitRerollUnit
+    end
+
+    local unit = resolveStatRerollUnit(nameFilter)
+    if not unit then
+        local trim = type(nameFilter) == "string" and (nameFilter:match("^%s*(.-)%s*$") or "") or ""
+        if #trim > 0 then
+            return false, "no_match"
+        end
+        return false, "no_unit"
+    end
+
+    if opts.skipAnim then
+        trySetSkipTraitRerollAnim(true)
+    end
+
+    local mode = opts.mode or "until_goal"
+    if getgenv and (getgenv().BonusChestTraitRerollMode == "until_goal" or getgenv().BonusChestTraitRerollMode == "always_apply") then
+        mode = getgenv().BonusChestTraitRerollMode
+    end
+
+    local goalCsv = opts.goalCsv or ""
+    if getgenv and type(getgenv().BonusChestTraitRerollGoals) == "string" then
+        goalCsv = getgenv().BonusChestTraitRerollGoals
+    end
+    local goals = parseCommaGoals(goalCsv)
+
+    if mode == "until_goal" and #goals == 0 then
+        return false, "no_goals"
+    end
+
+    if mode == "until_goal" then
+        local curTrait = getUnitTraitDisplayName(unit)
+        if #curTrait > 0 and traitNameMatchesGoals(curTrait, goals) then
+            return false, "already_goal"
+        end
+    end
+
+    local okBuy, ret = pcall(function()
+        return buyFn(upgrades, LP, unit)
+    end)
+    if not okBuy then
+        return false, "buy_failed"
+    end
+
+    local newTrait = parseTraitFromRerollResult(ret)
+
+    local useNew = true
+    if mode == "until_goal" then
+        if #newTrait == 0 then
+            pcall(function()
+                actFn(upgrades, LP, "KeepCurrent")
+            end)
+            return false, "bad_roll"
+        end
+        useNew = traitNameMatchesGoals(newTrait, goals)
+    end
+
+    pcall(function()
+        actFn(upgrades, LP, useNew and "UseNew" or "KeepCurrent")
+    end)
+
+    if mode == "until_goal" then
+        if useNew then
+            return true, "goal_met"
+        end
+        return true, "discarded"
+    end
+    return true, "used_new"
+end
+
 local function getVoteRemote()
     local systems = ReplicatedStorage:FindFirstChild("Systems")
     local voting = systems and systems:FindFirstChild("Voting")
@@ -270,10 +1678,6 @@ local function getVoteRemote()
         return ev
     end
     return nil
-end
-
-local function roundEndGuiButtonVisible(buttonName)
-    return playerGuiDescendantShown(buttonName)
 end
 
 --- Same as RoundEnd UI: Voting:Vote after intermission (Next = next stage/map, Retry = restart stage).
@@ -309,6 +1713,231 @@ local function fireMapReady()
     return true
 end
 
+--- WaveData keys (must match game): used for MAP SELECTION list entry names + SetQueue.
+local STORY_MAP_OPTIONS = {
+    { text = "Rookie Island", value = "RookieIsland" },
+    { text = "Volcano Fortress", value = "VolcanoFortress" },
+    { text = "Frozen Glacier", value = "FrozenGlacier" },
+    { text = "Calamity Canyon", value = "CalamityCanyon" },
+}
+
+local function storyMapOptionIndexForKey(key)
+    if type(key) ~= "string" then
+        return 2
+    end
+    for i, row in ipairs(STORY_MAP_OPTIONS) do
+        if row.value == key then
+            return i
+        end
+    end
+    return 2
+end
+
+--- RaidSelect dungeon stages (WaveData.Dungeon.Stages order).
+local DUNGEON_STAGE_OPTIONS = {
+    { text = "1 · Food Dungeon", value = 1 },
+    { text = "2 · Fusion Dungeon", value = 2 },
+    { text = "3 · Mythic Dungeon", value = 3 },
+}
+
+local function dungeonStageOptionIndex(n)
+    n = tonumber(n) or 1
+    return math.clamp(math.floor(n), 1, #DUNGEON_STAGE_OPTIONS)
+end
+
+local ROTATING_SHOP_OPTIONS = {
+    { text = "Item Shop", value = "ItemShop" },
+    { text = "PvP Shop", value = "PvPShop" },
+}
+
+local function rotatingShopOptionIndex(key)
+    if key == "PvPShop" then
+        return 2
+    end
+    return 1
+end
+
+local function mapListInnerList(mapList)
+    if not mapList then
+        return nil
+    end
+    local listHolder = mapList:FindFirstChild("ListContainer")
+    listHolder = listHolder and listHolder:FindFirstChild("List") or mapList:FindFirstChild("List")
+    return listHolder
+end
+
+local function screenGuiAncestor(inst)
+    return inst and inst:FindFirstAncestorOfClass("ScreenGui")
+end
+
+local function findStartButtonInScreenGui(sg)
+    if not sg then
+        return nil
+    end
+    for _, d in ipairs(sg:GetDescendants()) do
+        if d.Name == "StartButton" and d:IsA("GuiButton") and guiObjectShownOnScreen(d) then
+            return d
+        end
+    end
+    return nil
+end
+
+--- Story MapSelect: one row per map key; rows do not use StageNum (RaidSelect does).
+local function findStoryMapRow(mapKey)
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then
+        return nil, nil
+    end
+    for _, mapList in ipairs(pg:GetDescendants()) do
+        if mapList.Name == "MapList" and mapList:IsA("GuiObject") and guiObjectShownOnScreen(mapList) then
+            local holder = mapListInnerList(mapList)
+            if holder then
+                local e = holder:FindFirstChild(mapKey)
+                if e and e:IsA("GuiObject") and e:GetAttribute("StageNum") == nil then
+                    return mapList, e
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function findStageListInScreenGui(sg)
+    if not sg then
+        return nil
+    end
+    for _, d in ipairs(sg:GetDescendants()) do
+        if d.Name == "StageList" and d:IsA("GuiObject") and guiObjectShownOnScreen(d) then
+            return d
+        end
+    end
+    return nil
+end
+
+--- RaidSelect: one row per raid stage; same Name (e.g. Dungeon) + attribute StageNum.
+local function findRaidMapRow(raidKey, stageNum)
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then
+        return nil, nil
+    end
+    for _, mapList in ipairs(pg:GetDescendants()) do
+        if mapList.Name == "MapList" and mapList:IsA("GuiObject") and guiObjectShownOnScreen(mapList) then
+            local holder = mapListInnerList(mapList)
+            if holder then
+                for _, ch in ipairs(holder:GetChildren()) do
+                    if ch.Name == raidKey and tonumber(ch:GetAttribute("StageNum")) == stageNum then
+                        return mapList, ch
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function guiActivate(inst)
+    if not inst then
+        return
+    end
+    pcall(function()
+        if inst:IsA("GuiButton") then
+            inst:Activate()
+        end
+    end)
+end
+
+--- Clicks map row → stage row → Start when the story map-select UI is visible (Queue:SetQueue path).
+local function tryAutoStartStoryOnce(mapKey, stageNum)
+    if type(mapKey) ~= "string" or #mapKey == 0 then
+        return false, "bad_map"
+    end
+    stageNum = tonumber(stageNum)
+    if not stageNum or stageNum < 1 then
+        return false, "bad_stage"
+    end
+    stageNum = math.floor(stageNum)
+
+    local mapList, mapEntry = findStoryMapRow(mapKey)
+    if not mapList or not mapEntry then
+        return false, "no_ui"
+    end
+    local sg = screenGuiAncestor(mapList)
+    local mapLock = mapEntry:FindFirstChild("Container", true)
+    mapLock = mapLock and mapLock:FindFirstChild("LockState")
+    if mapLock and mapLock:IsA("GuiObject") and mapLock.Visible then
+        return false, "map_locked"
+    end
+    guiActivate(mapEntry:IsA("GuiButton") and mapEntry or mapEntry:FindFirstDescendantWhichIsA("GuiButton"))
+    task.wait(0.18)
+
+    local stageList = findStageListInScreenGui(sg)
+    if not stageList then
+        return false, "no_stage_list"
+    end
+    local sList = stageList:FindFirstChild("List")
+    if not sList then
+        return false, "no_stage_list"
+    end
+    local want = "Stage " .. tostring(stageNum)
+    local stageEntry
+    for _, ch in ipairs(sList:GetChildren()) do
+        local cont = ch:FindFirstChild("Container")
+        local lab = cont and cont:FindFirstChild("Label")
+        if lab and lab:IsA("TextLabel") and lab.Text == want then
+            stageEntry = ch
+            break
+        end
+    end
+    if not stageEntry then
+        return false, "no_stage"
+    end
+    local stLock = stageEntry:FindFirstChild("Container") and stageEntry.Container:FindFirstChild("LockState")
+    if stLock and stLock:IsA("GuiObject") and stLock.Visible then
+        return false, "stage_locked"
+    end
+    guiActivate(stageEntry:IsA("GuiButton") and stageEntry or stageEntry:FindFirstDescendantWhichIsA("GuiButton"))
+    task.wait(0.14)
+
+    local startBtn = findStartButtonInScreenGui(sg)
+    if not startBtn then
+        return false, "no_start"
+    end
+    guiActivate(startBtn)
+    return true, nil
+end
+
+--- Raid / dungeon: single list row selects map+stage; Start in same ScreenGui (RaidSelect).
+local function tryAutoStartDungeonOnce(raidKey, stageNum)
+    if type(raidKey) ~= "string" or #raidKey == 0 then
+        return false, "bad_map"
+    end
+    stageNum = tonumber(stageNum)
+    if not stageNum or stageNum < 1 then
+        return false, "bad_stage"
+    end
+    stageNum = math.floor(stageNum)
+
+    local mapList, row = findRaidMapRow(raidKey, stageNum)
+    if not mapList or not row then
+        return false, "no_ui"
+    end
+    local sg = screenGuiAncestor(mapList)
+    local rowLock = row:FindFirstChild("Container", true)
+    rowLock = rowLock and rowLock:FindFirstChild("LockState")
+    if rowLock and rowLock:IsA("GuiObject") and rowLock.Visible then
+        return false, "map_locked"
+    end
+    guiActivate(row:IsA("GuiButton") and row or row:FindFirstDescendantWhichIsA("GuiButton"))
+    task.wait(0.2)
+
+    local startBtn = findStartButtonInScreenGui(sg)
+    if not startBtn then
+        return false, "no_start"
+    end
+    guiActivate(startBtn)
+    return true, nil
+end
+
 local function fireRoundEndVote(wantNext, wantRetry)
     if not wantNext and not wantRetry then
         return
@@ -317,22 +1946,34 @@ local function fireRoundEndVote(wantNext, wantRetry)
     if not ev then
         return
     end
-    local nextShown = wantNext and roundEndGuiButtonVisible("NextStageButton")
-    local restartShown = wantRetry and roundEndGuiButtonVisible("RestartButton")
+    local nextShown = wantNext and roundEndNextUiVisible()
+    local restartShown = wantRetry and roundEndRetryUiVisible()
+    local timerActive = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
+
+    local function tryActivate(which)
+        local b = findShownGuiButtonForRoundEnd(which)
+        if b then
+            pcall(function()
+                b:Activate()
+            end)
+        end
+    end
+
     if nextShown then
         pcall(function()
             ev:FireServer("Next")
         end)
+        tryActivate("next")
         return
     end
     if restartShown then
         pcall(function()
             ev:FireServer("Retry")
         end)
+        tryActivate("retry")
         return
     end
-    -- Voting is open but our GUI probe missed (duplicate names, clipping). Solo rounds can clear the timer fast.
-    local timerActive = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
+    -- No matching UI; still try Vote if server voting window is open (timer), or blind retry when only one toggle.
     if not timerActive then
         return
     end
@@ -484,16 +2125,15 @@ local function collectAllChests(progressCb)
 end
 
 -- ── NexusLib UI ───────────────────────────────────────────────
-local Win = NexusLib:Window({ title = "Bonus Chests", width = 360, height = 680 })
+local Win = NexusLib:Window({ title = "Summon Heroes", width = 360, height = 1880 })
 
-local T = Win:Tab("📦", "Chests")
+local T = Win:Tab("✨", "Summon Heroes")
 T:Section("Map chests")
 T:Label("BonusChestPart · TP + fireproximityprompt; E-wait only if prompt stays enabled.")
 
 local hint = T:Label("Ready.")
 
--- Movement: walk speed slider, infinite jump, anti-AFK (VirtualUser every 55s). Also noclip / god / respawn in NexusLib.
-Win:PlayerTab()
+-- Player tab (walk speed + toggles) is created after persistAll() so changes call persistAll — see playerTabRefs below.
 
 local function setHint(text)
     hint.Set(text)
@@ -526,9 +2166,110 @@ local reviveToggleRef
 local readyToggleRef
 local nextStageToggleRef
 local retryStageToggleRef
+local redeemToggleRef
 local queueToggleRef
+local storyStartToggleRef
+local storyMapDropdownRef
+local storyStageInputRef
+local dungeonStartToggleRef
+local dungeonRaidKeyInputRef
+local dungeonStageDropdownRef
+local rotatingShopToggleRef
+local rotatingShopDropdownRef
+local rotatingShopFilterInputRef
+local fuseToggleRef
+local fuseMinInputRef
+local fuseMaxInputRef
+local fuseFodderMaxInputRef
+local summonToggleRef
+local summonPackDropdownRef
+local summonAmountInputRef
+local summonCurrencyDropdownRef
+local sellRareToggleRef
+local sellEpicToggleRef
+local sellLegendaryToggleRef
+local sellMythicToggleRef
+local statRerollToggleRef
+local statRerollUnitInputRef
+local statRerollModeDropdownRef
+local statRerollMaxRollsInputRef
+local statRerollDelayInputRef
+local statRerollLockAtkToggleRef
+local statRerollLockHpToggleRef
+local statRerollLockCdToggleRef
+local statRerollLockSpdToggleRef
+local traitRerollToggleRef
+local traitRerollUnitInputRef
+local traitRerollGoalsInputRef
+local traitRerollModeDropdownRef
+local traitRerollMaxRollsInputRef
+local traitRerollDelayInputRef
+local traitRerollSkipAnimToggleRef
+local claimAchievementsToggleRef
+local claimDailyToggleRef
+local claimQuestsIntervalInputRef
+local playerTabRefs = {}
 
 local function persistAll()
+    local mapVal = saved.storyMapKey
+    if storyMapDropdownRef then
+        local _, v = storyMapDropdownRef.Get()
+        if type(v) == "string" then
+            mapVal = v
+        end
+    end
+    local stageNum = storyStageInputRef and tonumber(storyStageInputRef.Get()) or saved.storyStage
+    if not stageNum or stageNum < 1 then
+        stageNum = 1
+    end
+    local raidKey = saved.dungeonRaidKey
+    if dungeonRaidKeyInputRef then
+        local s = dungeonRaidKeyInputRef.Get()
+        if type(s) == "string" then
+            s = (s:match("^%s*(.-)%s*$") or "")
+            if #s > 0 then
+                raidKey = s
+            end
+        end
+    end
+    local dStage = saved.dungeonStage
+    if dungeonStageDropdownRef then
+        local _, v = dungeonStageDropdownRef.Get()
+        if type(v) == "number" then
+            dStage = v
+        end
+    end
+    local rShopKey = saved.rotatingShopKey
+    if rotatingShopDropdownRef then
+        local _, v = rotatingShopDropdownRef.Get()
+        if type(v) == "string" and #v > 0 then
+            rShopKey = v
+        end
+    end
+    local rFilter = saved.rotatingShopFilter
+    if rotatingShopFilterInputRef then
+        local s = rotatingShopFilterInputRef.Get()
+        if type(s) == "string" then
+            rFilter = s
+        end
+    end
+    local fMin = fuseMinInputRef and tonumber(fuseMinInputRef.Get()) or saved.fuseMinStars
+    local fMax = fuseMaxInputRef and tonumber(fuseMaxInputRef.Get()) or saved.fuseMaxStars
+    local fFd = fuseFodderMaxInputRef and tonumber(fuseFodderMaxInputRef.Get()) or saved.fuseMaxFodderLevel
+    if not fMin then
+        fMin = 3
+    end
+    if not fMax then
+        fMax = 9
+    end
+    if not fFd then
+        fFd = 0
+    end
+    local fMinCl = math.clamp(math.floor(fMin), 3, 9)
+    local fMaxCl = math.clamp(math.floor(fMax), 3, 9)
+    if fMaxCl < fMinCl then
+        fMinCl, fMaxCl = fMaxCl, fMinCl
+    end
     saveConfig({
         autoCollect = autoToggleRef and autoToggleRef.Get() or false,
         queueOnTeleport = queueToggleRef and queueToggleRef.Get() or true,
@@ -536,6 +2277,146 @@ local function persistAll()
         autoReadyUp = readyToggleRef and readyToggleRef.Get() or false,
         autoPlayNextMap = nextStageToggleRef and nextStageToggleRef.Get() or false,
         autoRetryStage = retryStageToggleRef and retryStageToggleRef.Get() or false,
+        autoRedeemCodes = redeemToggleRef and redeemToggleRef.Get() or false,
+        autoStartStory = storyStartToggleRef and storyStartToggleRef.Get() or false,
+        storyMapKey = type(mapVal) == "string" and mapVal or saved.storyMapKey,
+        storyStage = stageNum,
+        autoStartDungeon = dungeonStartToggleRef and dungeonStartToggleRef.Get() or false,
+        dungeonRaidKey = raidKey,
+        dungeonStage = dStage,
+        autoBuyRotatingShop = rotatingShopToggleRef and rotatingShopToggleRef.Get() or false,
+        rotatingShopKey = rShopKey,
+        rotatingShopFilter = type(rFilter) == "string" and rFilter or "",
+        autoFuseUnits = fuseToggleRef and fuseToggleRef.Get() or false,
+        fuseMinStars = fMinCl,
+        fuseMaxStars = fMaxCl,
+        fuseMaxFodderLevel = math.max(0, math.floor(fFd)),
+        autoSummon = summonToggleRef and summonToggleRef.Get() or saved.autoSummon,
+        summonPack = (function()
+            local p = saved.summonPack
+            if summonPackDropdownRef then
+                local _, v = summonPackDropdownRef.Get()
+                if type(v) == "string" and #v > 0 then
+                    p = v
+                end
+            end
+            return p
+        end)(),
+        summonAmount = math.clamp(
+            math.floor(
+                tonumber(summonAmountInputRef and summonAmountInputRef.Get() or saved.summonAmount) or 1
+            ),
+            1,
+            10
+        ),
+        summonCurrency = (function()
+            local c = saved.summonCurrency
+            if summonCurrencyDropdownRef then
+                local _, v = summonCurrencyDropdownRef.Get()
+                if type(v) == "string" and #v > 0 then
+                    c = v
+                end
+            end
+            return c
+        end)(),
+        summonSellDelaySec = math.clamp(
+            math.floor(tonumber(summonSellDelayInputRef and summonSellDelayInputRef.Get() or saved.summonSellDelaySec) or 12),
+            0,
+            120
+        ),
+        autoSellRare = sellRareToggleRef and sellRareToggleRef.Get() or saved.autoSellRare,
+        autoSellEpic = sellEpicToggleRef and sellEpicToggleRef.Get() or saved.autoSellEpic,
+        autoSellLegendary = sellLegendaryToggleRef and sellLegendaryToggleRef.Get() or saved.autoSellLegendary,
+        autoSellMythic = sellMythicToggleRef and sellMythicToggleRef.Get() or saved.autoSellMythic,
+        autoStatReroll = statRerollToggleRef and statRerollToggleRef.Get() or saved.autoStatReroll,
+        statRerollUnitName = statRerollUnitInputRef and statRerollUnitInputRef.Get() or saved.statRerollUnitName,
+        statRerollLockAttack = statRerollLockAtkToggleRef and statRerollLockAtkToggleRef.Get() or saved.statRerollLockAttack,
+        statRerollLockHealth = statRerollLockHpToggleRef and statRerollLockHpToggleRef.Get() or saved.statRerollLockHealth,
+        statRerollLockCooldown = statRerollLockCdToggleRef and statRerollLockCdToggleRef.Get() or saved.statRerollLockCooldown,
+        statRerollLockSpeed = statRerollLockSpdToggleRef and statRerollLockSpdToggleRef.Get() or saved.statRerollLockSpeed,
+        statRerollMode = (function()
+            local m = saved.statRerollMode
+            if statRerollModeDropdownRef then
+                local _, v = statRerollModeDropdownRef.Get()
+                if v == "always" or v == "better" then
+                    m = v
+                end
+            end
+            return m
+        end)(),
+        statRerollMaxRolls = math.max(
+            0,
+            math.floor(tonumber(statRerollMaxRollsInputRef and statRerollMaxRollsInputRef.Get() or saved.statRerollMaxRolls) or 0)
+        ),
+        statRerollDelaySec = math.clamp(
+            tonumber(statRerollDelayInputRef and statRerollDelayInputRef.Get() or saved.statRerollDelaySec) or 1.2,
+            0,
+            60
+        ),
+        autoTraitReroll = traitRerollToggleRef and traitRerollToggleRef.Get() or saved.autoTraitReroll,
+        traitRerollUnitName = traitRerollUnitInputRef and traitRerollUnitInputRef.Get() or saved.traitRerollUnitName,
+        traitRerollGoals = traitRerollGoalsInputRef and traitRerollGoalsInputRef.Get() or saved.traitRerollGoals,
+        traitRerollMode = (function()
+            local m = saved.traitRerollMode
+            if traitRerollModeDropdownRef then
+                local _, v = traitRerollModeDropdownRef.Get()
+                if v == "until_goal" or v == "always_apply" then
+                    m = v
+                end
+            end
+            return m
+        end)(),
+        traitRerollMaxRolls = math.max(
+            0,
+            math.floor(tonumber(traitRerollMaxRollsInputRef and traitRerollMaxRollsInputRef.Get() or saved.traitRerollMaxRolls) or 0)
+        ),
+        traitRerollDelaySec = math.clamp(
+            tonumber(traitRerollDelayInputRef and traitRerollDelayInputRef.Get() or saved.traitRerollDelaySec) or 1.2,
+            0,
+            60
+        ),
+        traitRerollSkipAnim = traitRerollSkipAnimToggleRef and traitRerollSkipAnimToggleRef.Get() or saved.traitRerollSkipAnim,
+        autoClaimAchievements = claimAchievementsToggleRef and claimAchievementsToggleRef.Get() or saved.autoClaimAchievements,
+        autoClaimDaily = claimDailyToggleRef and claimDailyToggleRef.Get() or saved.autoClaimDaily,
+        claimQuestsIntervalSec = math.clamp(
+            math.floor(tonumber(claimQuestsIntervalInputRef and claimQuestsIntervalInputRef.Get() or saved.claimQuestsIntervalSec) or 45),
+            5,
+            600
+        ),
+        playerWalkSpeed = (function()
+            local w = saved.playerWalkSpeed
+            if playerTabRefs.walkSlider and type(playerTabRefs.walkSlider.Get) == "function" then
+                local v = playerTabRefs.walkSlider.Get()
+                if type(v) == "number" then
+                    w = v
+                end
+            end
+            return math.clamp(math.floor(tonumber(w) or 16), 0, 300)
+        end)(),
+        playerInfiniteJump = (function()
+            if playerTabRefs.infiniteJump and type(playerTabRefs.infiniteJump.Get) == "function" then
+                return playerTabRefs.infiniteJump.Get() == true
+            end
+            return saved.playerInfiniteJump
+        end)(),
+        playerAntiAfk = (function()
+            if playerTabRefs.antiAfk and type(playerTabRefs.antiAfk.Get) == "function" then
+                return playerTabRefs.antiAfk.Get() == true
+            end
+            return saved.playerAntiAfk
+        end)(),
+        playerNoclip = (function()
+            if playerTabRefs.noclip and type(playerTabRefs.noclip.Get) == "function" then
+                return playerTabRefs.noclip.Get() == true
+            end
+            return saved.playerNoclip
+        end)(),
+        playerGodMode = (function()
+            if playerTabRefs.godMode and type(playerTabRefs.godMode.Get) == "function" then
+                return playerTabRefs.godMode.Get() == true
+            end
+            return saved.playerGodMode
+        end)(),
     })
 end
 
@@ -543,6 +2424,19 @@ local loopGen = 0
 local reviveGen = 0
 local readyGen = 0
 local stageGen = 0
+local redeemGen = 0
+local storyGen = 0
+local dungeonGen = 0
+local shopGen = 0
+local fuseGen = 0
+local summonGen = 0
+local statRerollGen = 0
+local traitRerollGen = 0
+local questClaimGen = 0
+local lastStoryLockStatus = 0
+local lastDungeonLockStatus = 0
+local lastShopHintTime = 0
+local lastFuseHintTime = 0
 
 local refreshStageWatcher
 
@@ -609,8 +2503,237 @@ readyToggleRef = T:Toggle("Auto ready up", "Checks ~1s · same as Ready in map H
     persistAll()
 end)
 
+T:Section("Story / map select")
+T:Label("Lobby MAP SELECTION: WaveData row name + stage index, then green Start (Activate).")
+
+storyMapDropdownRef = T:Dropdown(
+    "Story map",
+    "Internal keys: RookieIsland, VolcanoFortress, …",
+    STORY_MAP_OPTIONS,
+    storyMapOptionIndexForKey(saved.storyMapKey),
+    function()
+        persistAll()
+    end
+)
+
+storyStageInputRef = T:Input(
+    "Story stage",
+    "1 = Stage 1 (must be unlocked in-game)",
+    "3",
+    tostring(saved.storyStage),
+    function()
+        persistAll()
+    end
+)
+
+storyStartToggleRef = T:Toggle("Auto start story", "While map-select UI is visible (~0.55s)", saved.autoStartStory, function(on)
+    storyGen = storyGen + 1
+    local g = storyGen
+    if on then
+        task.spawn(function()
+            while g == storyGen do
+                local mapKey = saved.storyMapKey
+                if getgenv and type(getgenv().BonusChestStoryMap) == "string" and #getgenv().BonusChestStoryMap > 0 then
+                    mapKey = getgenv().BonusChestStoryMap
+                elseif storyMapDropdownRef then
+                    local _, v = storyMapDropdownRef.Get()
+                    if type(v) == "string" then
+                        mapKey = v
+                    end
+                end
+                local st = saved.storyStage
+                if getgenv and type(getgenv().BonusChestStoryStage) == "number" then
+                    st = getgenv().BonusChestStoryStage
+                elseif storyStageInputRef then
+                    st = tonumber(storyStageInputRef.Get()) or st
+                end
+                local ok, why = tryAutoStartStoryOnce(mapKey, st)
+                if ok then
+                    Win:Notify("Story", ("Starting %s · stage %s"):format(tostring(mapKey), tostring(st)), 3, "success")
+                elseif why == "map_locked" or why == "stage_locked" then
+                    local t = os.clock()
+                    if t - lastStoryLockStatus > 4 then
+                        lastStoryLockStatus = t
+                        Win:Status("Story: locked — clear requirement or pick another map/stage")
+                    end
+                end
+                task.wait(0.55)
+            end
+        end)
+    else
+        Win:Status("Story auto-start OFF")
+    end
+    persistAll()
+end)
+
+T:Section("Dungeons (raid select)")
+T:Label("RaidSelect: pick the row for that dungeon stage, then Start. Default raid key is Dungeon.")
+
+dungeonRaidKeyInputRef = T:Input(
+    "Raid WaveData key",
+    "Usually Dungeon (IsRaid maps in RaidSelect)",
+    "Dungeon",
+    saved.dungeonRaidKey,
+    function()
+        persistAll()
+    end
+)
+
+dungeonStageDropdownRef = T:Dropdown(
+    "Dungeon stage",
+    "Matches MapList row StageNum attribute",
+    DUNGEON_STAGE_OPTIONS,
+    dungeonStageOptionIndex(saved.dungeonStage),
+    function()
+        persistAll()
+    end
+)
+
+dungeonStartToggleRef = T:Toggle("Auto start dungeon", "While raid/dungeon picker is visible (~0.55s)", saved.autoStartDungeon, function(on)
+    dungeonGen = dungeonGen + 1
+    local g = dungeonGen
+    if on then
+        task.spawn(function()
+            while g == dungeonGen do
+                local raidKey = saved.dungeonRaidKey
+                if getgenv and type(getgenv().BonusChestDungeonRaidKey) == "string" and #getgenv().BonusChestDungeonRaidKey > 0 then
+                    raidKey = getgenv().BonusChestDungeonRaidKey
+                elseif dungeonRaidKeyInputRef then
+                    local s = dungeonRaidKeyInputRef.Get()
+                    if type(s) == "string" then
+                        s = (s:match("^%s*(.-)%s*$") or "")
+                        if #s > 0 then
+                            raidKey = s
+                        end
+                    end
+                end
+                local dst = saved.dungeonStage
+                if getgenv and type(getgenv().BonusChestDungeonStage) == "number" then
+                    dst = getgenv().BonusChestDungeonStage
+                elseif dungeonStageDropdownRef then
+                    local _, v = dungeonStageDropdownRef.Get()
+                    if type(v) == "number" then
+                        dst = v
+                    end
+                end
+                local ok, why = tryAutoStartDungeonOnce(raidKey, dst)
+                if ok then
+                    Win:Notify("Dungeon", ("Starting %s · stage %s"):format(tostring(raidKey), tostring(dst)), 3, "success")
+                elseif why == "map_locked" then
+                    local t = os.clock()
+                    if t - lastDungeonLockStatus > 4 then
+                        lastDungeonLockStatus = t
+                        Win:Status("Dungeon: row locked (level / hourly limit) — change stage or wait")
+                    end
+                end
+                task.wait(0.55)
+            end
+        end)
+    else
+        Win:Status("Dungeon auto-start OFF")
+    end
+    persistAll()
+end)
+
+T:Section("Unit fusion")
+T:Label("UnitFusion.PurchaseFuse: 1 main + 3 unequipped same-star fodder (lowest level first). Equipped mains tried first.")
+
+fuseMinInputRef = T:Input(
+    "Min star tier",
+    "Only fuse units at this star count or higher (3–9)",
+    "3",
+    tostring(saved.fuseMinStars),
+    function()
+        persistAll()
+    end
+)
+
+fuseMaxInputRef = T:Input(
+    "Max star tier",
+    "Do not fuse above this star (3–9)",
+    "9",
+    tostring(saved.fuseMaxStars),
+    function()
+        persistAll()
+    end
+)
+
+fuseFodderMaxInputRef = T:Input(
+    "Max fodder level",
+    "0 = any level; else only sacrifices with Level ≤ this",
+    "0",
+    tostring(saved.fuseMaxFodderLevel),
+    function()
+        persistAll()
+    end
+)
+
+T:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time", nil, function()
+    task.spawn(function()
+        local ok, why = tryAutoFuseOnce({
+            minStars = fuseMinInputRef and tonumber(fuseMinInputRef.Get()) or saved.fuseMinStars,
+            maxStars = fuseMaxInputRef and tonumber(fuseMaxInputRef.Get()) or saved.fuseMaxStars,
+            maxFodderLevel = fuseFodderMaxInputRef and tonumber(fuseFodderMaxInputRef.Get()) or saved.fuseMaxFodderLevel,
+        })
+        if ok then
+            Win:Notify("Fuse", "Fusion completed.", 3, "success")
+        elseif why == "no_profile" or why == "no_inventory" then
+            Win:Notify("Fuse", "Profile / inventory not ready.", 4, "warning")
+        elseif why == "no_fusion" then
+            Win:Notify("Fuse", "UnitFusion module not found.", 4, "error")
+        else
+            Win:Notify("Fuse", "No valid fuse (stock, coins, crystals, or filters).", 4, "warning")
+        end
+    end)
+end)
+
+fuseToggleRef = T:Toggle("Auto fuse units", "Tries ~every 3s when profile is loaded", saved.autoFuseUnits, function(on)
+    fuseGen = fuseGen + 1
+    local g = fuseGen
+    if on then
+        task.spawn(function()
+            while g == fuseGen do
+                local o = {
+                    minStars = saved.fuseMinStars,
+                    maxStars = saved.fuseMaxStars,
+                    maxFodderLevel = saved.fuseMaxFodderLevel,
+                }
+                if getgenv and type(getgenv().BonusChestFuseMinStars) == "number" then
+                    o.minStars = getgenv().BonusChestFuseMinStars
+                elseif fuseMinInputRef then
+                    o.minStars = tonumber(fuseMinInputRef.Get()) or o.minStars
+                end
+                if getgenv and type(getgenv().BonusChestFuseMaxStars) == "number" then
+                    o.maxStars = getgenv().BonusChestFuseMaxStars
+                elseif fuseMaxInputRef then
+                    o.maxStars = tonumber(fuseMaxInputRef.Get()) or o.maxStars
+                end
+                if getgenv and type(getgenv().BonusChestFuseMaxFodderLevel) == "number" then
+                    o.maxFodderLevel = getgenv().BonusChestFuseMaxFodderLevel
+                elseif fuseFodderMaxInputRef then
+                    o.maxFodderLevel = tonumber(fuseFodderMaxInputRef.Get()) or o.maxFodderLevel
+                end
+                local ok, why = tryAutoFuseOnce(o)
+                if ok then
+                    Win:Notify("Fuse", "Auto fusion completed.", 2, "success")
+                elseif why == "no_profile" or why == "no_inventory" or why == "no_fusion" then
+                    local t = os.clock()
+                    if t - lastFuseHintTime > 12 then
+                        lastFuseHintTime = t
+                        Win:Status("Fuse: wait for profile / UnitFusion")
+                    end
+                end
+                task.wait(3)
+            end
+        end)
+    else
+        Win:Status("Auto fuse OFF")
+    end
+    persistAll()
+end)
+
 T:Section("Stage vote")
-T:Label("Votes while RoundEndTimer runs (~0.35s). GUI scan picks visible Next/Retry; else timer fallback.")
+T:Label("Votes ~0.35s: names + “Next Stage”/“Retry Stage” text, FireServer + Activate; timer fallback.")
 
 nextStageToggleRef = T:Toggle("Auto play next map / stage", "Votes Next when the round-end screen offers it", saved.autoPlayNextMap, function()
     persistAll()
@@ -624,6 +2747,581 @@ retryStageToggleRef = T:Toggle("Auto retry stage", "Votes Retry when Restart is 
     if refreshStageWatcher then
         refreshStageWatcher()
     end
+end)
+
+T:Section("Item / PvP shop (rotating)")
+T:Label("RotatingShops.BuyItem · uses ItemName ids (Cupcake, TraitReroll, RareFusionCrystal…). * = buy any affordable + in stock.")
+
+rotatingShopDropdownRef = T:Dropdown(
+    "Shop",
+    "ItemShop = gold/gems; PvPShop = PVPTokens",
+    ROTATING_SHOP_OPTIONS,
+    rotatingShopOptionIndex(saved.rotatingShopKey),
+    function()
+        persistAll()
+    end
+)
+
+rotatingShopFilterInputRef = T:Input(
+    "Buy filter",
+    "Comma list or * (e.g. Cupcake,Candy,TraitReroll)",
+    "Cupcake,Donut",
+    saved.rotatingShopFilter,
+    function()
+        persistAll()
+    end
+)
+
+rotatingShopToggleRef = T:Toggle("Auto buy rotating shop", "Every ~2s · ~1s between purchases", saved.autoBuyRotatingShop, function(on)
+    shopGen = shopGen + 1
+    local g = shopGen
+    if on then
+        task.spawn(function()
+            while g == shopGen do
+                local shopKey = saved.rotatingShopKey
+                if getgenv and type(getgenv().BonusChestRotatingShopKey) == "string" and #getgenv().BonusChestRotatingShopKey > 0 then
+                    shopKey = getgenv().BonusChestRotatingShopKey
+                elseif rotatingShopDropdownRef then
+                    local _, v = rotatingShopDropdownRef.Get()
+                    if type(v) == "string" and #v > 0 then
+                        shopKey = v
+                    end
+                end
+                local filt = saved.rotatingShopFilter
+                if getgenv and type(getgenv().BonusChestRotatingShopFilter) == "string" then
+                    filt = getgenv().BonusChestRotatingShopFilter
+                elseif rotatingShopFilterInputRef then
+                    filt = rotatingShopFilterInputRef.Get() or filt
+                end
+                local n, why = tryRotatingShopAutoBuy(shopKey, filt)
+                if n > 0 then
+                    Win:Notify("Shop", ("Bought %d item(s)"):format(n), 3, "success")
+                elseif why == "no_filter" then
+                    local t = os.clock()
+                    if t - lastShopHintTime > 8 then
+                        lastShopHintTime = t
+                        Win:Status("Shop: set filter (* or ItemName list) to auto-buy")
+                    end
+                elseif why == "no_remote" or why == "no_module" or why == "no_currency" then
+                    local t = os.clock()
+                    if t - lastShopHintTime > 10 then
+                        lastShopHintTime = t
+                        Win:Status("Shop: RotatingShops / Currency not ready")
+                    end
+                end
+                task.wait(2)
+            end
+        end)
+    else
+        Win:Status("Rotating shop auto-buy OFF")
+    end
+    persistAll()
+end)
+
+T:Section("Summon Heroes")
+T:Label("Summon.BuyPack / BuyMythicBanner. First-time tutorial summon may block until done in-game.")
+
+summonPackDropdownRef = T:Dropdown(
+    "Pack",
+    "Mythic uses shards; A/B use gems or tickets",
+    SUMMON_PACK_OPTIONS,
+    summonPackDefaultIndex(saved.summonPack),
+    function()
+        persistAll()
+    end
+)
+
+summonAmountInputRef = T:Input(
+    "Amount (A/B only)",
+    "1–10 rolls per BuyPack",
+    "1",
+    tostring(saved.summonAmount),
+    function()
+        persistAll()
+    end
+)
+
+summonCurrencyDropdownRef = T:Dropdown(
+    "Currency (A/B)",
+    "Ignored for Mythic Banner",
+    SUMMON_CURRENCY_OPTIONS,
+    summonCurrencyDefaultIndex(saved.summonCurrency),
+    function()
+        persistAll()
+    end
+)
+
+summonSellDelayInputRef = T:Input(
+    "Sell delay (sec)",
+    "After PackOpened: wait then sell units matching toggles below",
+    "12",
+    tostring(saved.summonSellDelaySec),
+    function()
+        persistAll()
+    end
+)
+
+T:Label("Match in-game SUMMON “Auto Sell Units” — writes Settings.AutoSell_RarityN.")
+
+sellRareToggleRef = T:Toggle("Auto-sell Rare", "Rarity 3 · AutoSell_Rarity3", saved.autoSellRare, function(on)
+    setAutoSellRarityInGame(3, on)
+    persistAll()
+end)
+
+sellEpicToggleRef = T:Toggle("Auto-sell Epic", "Rarity 4", saved.autoSellEpic, function(on)
+    setAutoSellRarityInGame(4, on)
+    persistAll()
+end)
+
+sellLegendaryToggleRef = T:Toggle("Auto-sell Legendary", "Rarity 5", saved.autoSellLegendary, function(on)
+    setAutoSellRarityInGame(5, on)
+    persistAll()
+end)
+
+sellMythicToggleRef = T:Toggle("Auto-sell Mythic", "Rarity 6", saved.autoSellMythic, function(on)
+    setAutoSellRarityInGame(6, on)
+    persistAll()
+end)
+
+T:Button("✨", "Summon once", "BuyPack or BuyMythicBanner once", nil, function()
+    task.spawn(function()
+        local _, pack = summonPackDropdownRef.Get()
+        local amt = tonumber(summonAmountInputRef.Get()) or 1
+        local _, cur = summonCurrencyDropdownRef.Get()
+        local ok, why = trySummonOnce(type(pack) == "string" and pack or "Pack1", amt, type(cur) == "string" and cur or "Gems")
+        if why == "no_summon" then
+            Win:Notify("Summon Heroes", "Summon module not found.", 4, "error")
+        else
+            Win:Notify("Summon Heroes", "Request sent (check gems / tickets / shards / space).", 3, "success")
+        end
+    end)
+end)
+
+summonToggleRef = T:Toggle("Auto summon heroes", "Every ~1.2s · same as shop button cooldown", saved.autoSummon, function(on)
+    summonGen = summonGen + 1
+    local g = summonGen
+    if on then
+        task.spawn(function()
+            while g == summonGen do
+                local _, pack = summonPackDropdownRef.Get()
+                pack = (type(pack) == "string" and pack) or saved.summonPack
+                if getgenv and type(getgenv().BonusChestSummonPack) == "string" and #getgenv().BonusChestSummonPack > 0 then
+                    pack = getgenv().BonusChestSummonPack
+                end
+                local amt = tonumber(summonAmountInputRef.Get()) or saved.summonAmount
+                if getgenv and type(getgenv().BonusChestSummonAmount) == "number" then
+                    amt = getgenv().BonusChestSummonAmount
+                end
+                local _, cur = summonCurrencyDropdownRef.Get()
+                cur = (type(cur) == "string" and cur) or saved.summonCurrency
+                if getgenv and type(getgenv().BonusChestSummonCurrency) == "string" then
+                    cur = getgenv().BonusChestSummonCurrency
+                end
+                trySummonOnce(pack, amt, cur)
+                task.wait(1.2)
+            end
+        end)
+    else
+        Win:Status("Auto summon heroes OFF")
+    end
+    persistAll()
+end)
+
+T:Section("Stat reroll")
+T:Label("UnitUpgrades.BuyStatReroll + RerollAction. Each roll must end with UseNew or KeepCurrent (game rule).")
+
+statRerollUnitInputRef = T:Input(
+    "Unit name",
+    "Substring match; empty = highest level equipped, else inventory",
+    "",
+    saved.statRerollUnitName or "",
+    function()
+        persistAll()
+    end
+)
+
+statRerollModeDropdownRef = T:Dropdown(
+    "Policy",
+    "Better = sum of letter tiers on unlocked stats only (Curves.LetterMultiplier if present)",
+    STAT_REROLL_MODE_OPTIONS,
+    statRerollModeDefaultIndex(saved.statRerollMode),
+    function()
+        persistAll()
+    end
+)
+
+statRerollLockAtkToggleRef = T:Toggle("Lock Attack", "Same as in-game lock (higher reroll cost)", saved.statRerollLockAttack, function()
+    persistAll()
+end)
+
+statRerollLockHpToggleRef = T:Toggle("Lock Health", "Keep HP stat letter on reroll", saved.statRerollLockHealth, function()
+    persistAll()
+end)
+
+statRerollLockCdToggleRef = T:Toggle("Lock Cooldown (CD)", "Keep CD stat letter", saved.statRerollLockCooldown, function()
+    persistAll()
+end)
+
+statRerollLockSpdToggleRef = T:Toggle("Lock Speed", "Keep SPD stat letter", saved.statRerollLockSpeed, function()
+    persistAll()
+end)
+
+statRerollMaxRollsInputRef = T:Input(
+    "Max rolls (0 = ∞)",
+    "Auto stops after this many successful BuyStatReroll cycles",
+    "0",
+    tostring(saved.statRerollMaxRolls),
+    function()
+        persistAll()
+    end
+)
+
+statRerollDelayInputRef = T:Input(
+    "Delay (sec)",
+    "Wait between auto reroll attempts",
+    "1.2",
+    tostring(saved.statRerollDelaySec),
+    function()
+        persistAll()
+    end
+)
+
+T:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent per policy", nil, function()
+    task.spawn(function()
+        local _, mode = statRerollModeDropdownRef.Get()
+        local modeStr = (mode == "better" and "better") or "always"
+        local ok, why = tryStatRerollOnce({
+            unitNameFilter = statRerollUnitInputRef.Get(),
+            lockAtk = statRerollLockAtkToggleRef.Get(),
+            lockHp = statRerollLockHpToggleRef.Get(),
+            lockCd = statRerollLockCdToggleRef.Get(),
+            lockSpd = statRerollLockSpdToggleRef.Get(),
+            mode = modeStr,
+        })
+        if why == "no_module" then
+            Win:Notify("Stat reroll", "UnitUpgrades module not found.", 4, "error")
+        elseif why == "no_unit" then
+            Win:Notify("Stat reroll", "No unit in Profile (equipped / inventory).", 4, "warning")
+        elseif why == "no_match" then
+            Win:Notify("Stat reroll", "No unit matches name filter.", 4, "warning")
+        elseif why == "all_locked" then
+            Win:Notify("Stat reroll", "Unlock at least one stat.", 4, "warning")
+        elseif why == "buy_failed" then
+            Win:Notify("Stat reroll", "BuyStatReroll failed (coins / locks / state).", 4, "warning")
+        elseif ok then
+            Win:Notify("Stat reroll", why == "used_new" and "Applied new roll." or "Kept current stats.", 3, "success")
+        end
+    end)
+end)
+
+statRerollToggleRef = T:Toggle("Auto stat reroll", "Repeats until max rolls or toggle off", saved.autoStatReroll, function(on)
+    statRerollGen = statRerollGen + 1
+    local g = statRerollGen
+    if on then
+        task.spawn(function()
+            local rolls = 0
+            while g == statRerollGen do
+                local maxR = tonumber(statRerollMaxRollsInputRef.Get()) or saved.statRerollMaxRolls
+                if getgenv and type(getgenv().BonusChestStatRerollMaxRolls) == "number" then
+                    maxR = getgenv().BonusChestStatRerollMaxRolls
+                end
+                maxR = math.max(0, math.floor(maxR or 0))
+                if maxR > 0 and rolls >= maxR then
+                    statRerollToggleRef.Set(false)
+                    Win:Notify("Stat reroll", "Max rolls reached.", 3, "success")
+                    persistAll()
+                    break
+                end
+                local _, mode = statRerollModeDropdownRef.Get()
+                local modeStr = (mode == "better" and "better") or "always"
+                local ok, why = tryStatRerollOnce({
+                    unitNameFilter = statRerollUnitInputRef.Get(),
+                    lockAtk = statRerollLockAtkToggleRef.Get(),
+                    lockHp = statRerollLockHpToggleRef.Get(),
+                    lockCd = statRerollLockCdToggleRef.Get(),
+                    lockSpd = statRerollLockSpdToggleRef.Get(),
+                    mode = modeStr,
+                })
+                if ok then
+                    rolls = rolls + 1
+                end
+                if why == "no_module" or why == "no_unit" or why == "no_match" or why == "all_locked" then
+                    Win:Status("Stat reroll: " .. tostring(why))
+                    task.wait(2)
+                elseif why == "buy_failed" then
+                    task.wait(1.5)
+                else
+                    local d = tonumber(statRerollDelayInputRef.Get()) or saved.statRerollDelaySec
+                    d = math.clamp(d, 0, 60)
+                    task.wait(d > 0 and d or 0.05)
+                end
+            end
+        end)
+    else
+        Win:Status("Auto stat reroll OFF")
+    end
+    persistAll()
+end)
+
+T:Section("Trait reroll")
+T:Label("UnitUpgrades.BuyTraitReroll + TraitRerollAction (or RerollAction). Matches in-game REROLL TRAITS flow.")
+
+traitRerollUnitInputRef = T:Input(
+    "Unit name",
+    "Same rules as stat reroll · substring; empty = highest level equipped / inventory",
+    "",
+    saved.traitRerollUnitName or "",
+    function()
+        persistAll()
+    end
+)
+
+traitRerollGoalsInputRef = T:Input(
+    "Goal traits (comma)",
+    "Substring match e.g. Divine,Ultimate,Mythic · required for “until goal” mode",
+    "",
+    saved.traitRerollGoals or "",
+    function()
+        persistAll()
+    end
+)
+
+traitRerollModeDropdownRef = T:Dropdown(
+    "Policy",
+    "Until goal = keep trait if roll does not match; always apply = always take new trait",
+    TRAIT_REROLL_MODE_OPTIONS,
+    traitRerollModeDefaultIndex(saved.traitRerollMode),
+    function()
+        persistAll()
+    end
+)
+
+traitRerollSkipAnimToggleRef = T:Toggle(
+    "Skip trait anim (settings)",
+    "Tries Settings.SetConfig for SkipTraitRerollAnim / SkipTraitAnim (game-dependent)",
+    saved.traitRerollSkipAnim,
+    function()
+        if traitRerollSkipAnimToggleRef and traitRerollSkipAnimToggleRef.Get() then
+            trySetSkipTraitRerollAnim(true)
+        end
+        persistAll()
+    end
+)
+
+traitRerollMaxRollsInputRef = T:Input(
+    "Max rolls (0 = ∞)",
+    "Safety cap for auto",
+    "0",
+    tostring(saved.traitRerollMaxRolls),
+    function()
+        persistAll()
+    end
+)
+
+traitRerollDelayInputRef = T:Input(
+    "Delay (sec)",
+    "Wait between trait reroll attempts",
+    "1.2",
+    tostring(saved.traitRerollDelaySec),
+    function()
+        persistAll()
+    end
+)
+
+T:Button("🧬", "Reroll trait once", "BuyTraitReroll then UseNew or KeepCurrent", nil, function()
+    task.spawn(function()
+        local _, mode = traitRerollModeDropdownRef.Get()
+        local modeStr = (mode == "always_apply" and "always_apply") or "until_goal"
+        local ok, why = tryTraitRerollOnce({
+            unitNameFilter = traitRerollUnitInputRef.Get(),
+            goalCsv = traitRerollGoalsInputRef.Get(),
+            mode = modeStr,
+            skipAnim = traitRerollSkipAnimToggleRef.Get(),
+        })
+        if why == "no_module" then
+            Win:Notify("Trait reroll", "UnitUpgrades has no BuyTraitReroll / confirm API.", 5, "error")
+        elseif why == "no_unit" then
+            Win:Notify("Trait reroll", "No unit in Profile.", 4, "warning")
+        elseif why == "no_match" then
+            Win:Notify("Trait reroll", "No unit matches name filter.", 4, "warning")
+        elseif why == "no_goals" then
+            Win:Notify("Trait reroll", "Add goal traits or switch to “always apply”.", 5, "warning")
+        elseif why == "already_goal" then
+            Win:Notify("Trait reroll", "Unit already has a matching trait.", 4, "success")
+        elseif why == "buy_failed" then
+            Win:Notify("Trait reroll", "BuyTraitReroll failed (crystals / cooldown / state).", 4, "warning")
+        elseif why == "bad_roll" then
+            Win:Notify("Trait reroll", "Could not read pending trait from server — kept current.", 4, "warning")
+        elseif ok then
+            local msg = "Rerolled."
+            if why == "goal_met" then
+                msg = "Goal trait — applied."
+            elseif why == "discarded" then
+                msg = "No goal match — kept previous trait."
+            elseif why == "used_new" then
+                msg = "Applied new trait."
+            end
+            Win:Notify("Trait reroll", msg, 3, "success")
+        end
+    end)
+end)
+
+traitRerollToggleRef = T:Toggle("Auto trait reroll", "Until goal: stops when a goal matches. Caps at max rolls.", saved.autoTraitReroll, function(on)
+    traitRerollGen = traitRerollGen + 1
+    local g = traitRerollGen
+    if on then
+        if traitRerollSkipAnimToggleRef and traitRerollSkipAnimToggleRef.Get() then
+            trySetSkipTraitRerollAnim(true)
+        end
+        task.spawn(function()
+            local rolls = 0
+            while g == traitRerollGen do
+                local maxR = tonumber(traitRerollMaxRollsInputRef.Get()) or saved.traitRerollMaxRolls
+                if getgenv and type(getgenv().BonusChestTraitRerollMaxRolls) == "number" then
+                    maxR = getgenv().BonusChestTraitRerollMaxRolls
+                end
+                maxR = math.max(0, math.floor(maxR or 0))
+                if maxR > 0 and rolls >= maxR then
+                    traitRerollToggleRef.Set(false)
+                    Win:Notify("Trait reroll", "Max rolls reached.", 3, "success")
+                    persistAll()
+                    break
+                end
+                local _, mode = traitRerollModeDropdownRef.Get()
+                local modeStr = (mode == "always_apply" and "always_apply") or "until_goal"
+                local ok, why = tryTraitRerollOnce({
+                    unitNameFilter = traitRerollUnitInputRef.Get(),
+                    goalCsv = traitRerollGoalsInputRef.Get(),
+                    mode = modeStr,
+                    skipAnim = traitRerollSkipAnimToggleRef and traitRerollSkipAnimToggleRef.Get(),
+                })
+                if ok then
+                    rolls = rolls + 1
+                end
+                if why == "goal_met" then
+                    traitRerollToggleRef.Set(false)
+                    Win:Notify("Trait reroll", "Goal trait matched — auto stopped.", 4, "success")
+                    persistAll()
+                    break
+                end
+                if why == "no_module" or why == "no_unit" or why == "no_match" or why == "no_goals" or why == "already_goal" then
+                    Win:Status("Trait reroll: " .. tostring(why))
+                    task.wait(2)
+                elseif why == "buy_failed" or why == "bad_roll" then
+                    task.wait(1.5)
+                else
+                    local d = tonumber(traitRerollDelayInputRef.Get()) or saved.traitRerollDelaySec
+                    d = math.clamp(d, 0, 60)
+                    task.wait(d > 0 and d or 0.05)
+                end
+            end
+        end)
+    else
+        Win:Status("Auto trait reroll OFF")
+    end
+    persistAll()
+end)
+
+T:Section("Quests (Achievements & Daily)")
+T:Label("Tries Systems.Quests / Achievements / Quest modules + QuestEvent. Server ignores unready claims.")
+
+claimQuestsIntervalInputRef = T:Input(
+    "Interval (sec)",
+    "How often auto-claim runs (min 5)",
+    "45",
+    tostring(saved.claimQuestsIntervalSec),
+    function()
+        persistAll()
+    end
+)
+
+T:Button("📜", "Claim all now", "Achievements + Daily claim pass", nil, function()
+    task.spawn(function()
+        local ok, why = tryClaimAchievementsAndDailyOnce({ achievements = true, daily = true })
+        if why == "no_api" then
+            Win:Notify("Quests", "No Quests module or QuestEvent — game API may differ.", 5, "warning")
+        else
+            Win:Notify("Quests", "Claim pass sent (server decides what is ready).", 3, "success")
+        end
+    end)
+end)
+
+local function restartQuestAutoClaimLoop()
+    questClaimGen = questClaimGen + 1
+    local g = questClaimGen
+    local wantA = claimAchievementsToggleRef and claimAchievementsToggleRef.Get()
+    local wantD = claimDailyToggleRef and claimDailyToggleRef.Get()
+    if not wantA and not wantD then
+        Win:Status("Auto quest claim OFF")
+        return
+    end
+    task.spawn(function()
+        while g == questClaimGen do
+            local a = claimAchievementsToggleRef and claimAchievementsToggleRef.Get()
+            local d = claimDailyToggleRef and claimDailyToggleRef.Get()
+            if not a and not d then
+                break
+            end
+            local ok, why = tryClaimAchievementsAndDailyOnce({
+                achievements = a,
+                daily = d,
+            })
+            if why == "no_api" then
+                Win:Status("Quests: no Quests/QuestEvent API")
+            end
+            local w = tonumber(claimQuestsIntervalInputRef.Get()) or saved.claimQuestsIntervalSec
+            if getgenv and type(getgenv().BonusChestClaimQuestsIntervalSec) == "number" then
+                w = getgenv().BonusChestClaimQuestsIntervalSec
+            end
+            w = math.clamp(math.floor(w or 45), 5, 600)
+            task.wait(w)
+        end
+    end)
+end
+
+claimAchievementsToggleRef = T:Toggle("Auto claim achievements", "Repeats at interval · in-game QUESTS Achievements tab", saved.autoClaimAchievements, function(on)
+    restartQuestAutoClaimLoop()
+    persistAll()
+end)
+
+claimDailyToggleRef = T:Toggle("Auto claim daily", "Repeats at interval · in-game QUESTS Daily tab", saved.autoClaimDaily, function(on)
+    restartQuestAutoClaimLoop()
+    persistAll()
+end)
+
+T:Section("Promo codes")
+T:Label("PromoCodes.ClaimCode · set getgenv().BonusChestPromoCodes or PROMO_CODES_EDIT in script.")
+
+T:Button("🎁", "Redeem all now", "Fire every code once (server may reject duplicates)", nil, function()
+    task.spawn(function()
+        local ok, why = redeemPromoCodesOnce()
+        if why == "no_remote" then
+            Win:Notify("Codes", "PromoCodes.ClaimCode not found.", 4, "error")
+        elseif why == "no_codes" then
+            Win:Notify("Codes", "No codes — add BonusChestPromoCodes or PROMO_CODES_EDIT.", 5, "warning")
+        else
+            Win:Notify("Codes", "Sent " .. tostring(#collectPromoCodeStrings()) .. " code(s).", 3, "success")
+        end
+    end)
+end)
+
+redeemToggleRef = T:Toggle("Auto redeem codes", "Retry full list every 2 min (for new codes)", saved.autoRedeemCodes, function(on)
+    redeemGen = redeemGen + 1
+    local myRedeem = redeemGen
+    if on then
+        task.spawn(function()
+            while myRedeem == redeemGen do
+                local ok, why = redeemPromoCodesOnce()
+                if why == "no_remote" then
+                    Win:Status("Codes: PromoCodes missing")
+                elseif why == "no_codes" then
+                    Win:Status("Codes: add BonusChestPromoCodes")
+                end
+                task.wait(120)
+            end
+        end)
+    end
+    persistAll()
 end)
 
 refreshStageWatcher = function()
@@ -641,7 +3339,10 @@ refreshStageWatcher = function()
             if not anyStageAuto() then
                 break
             end
-            if ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil then
+            local timerOn = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
+            local uiNext = roundEndNextUiVisible()
+            local uiRetry = roundEndRetryUiVisible()
+            if timerOn or uiNext or uiRetry then
                 fireRoundEndVote(
                     nextStageToggleRef and nextStageToggleRef.Get(),
                     retryStageToggleRef and retryStageToggleRef.Get()
@@ -676,7 +3377,7 @@ queueToggleRef = T:Toggle(
         local ok, why = tryQueueOnTeleport()
         reexecQueued = ok
         if ok then
-            Win:Status("Bonus chests · will re-run on teleport")
+            Win:Status("Summon Heroes · will re-run on teleport")
             Win:Notify("Re-exec", "Queued for next server / teleport.", 3, "success")
         elseif why == "skipped" then
             Win:Notify("Re-exec", "BonusChestNoQueue is set — clear getgenv().BonusChestNoQueue", 4, "warning")
@@ -700,8 +3401,26 @@ if saved.queueOnTeleport and not (getgenv and getgenv().BonusChestNoQueue == tru
     end)
 end
 
+-- Player tab after all main-tab refs exist so the first persistAll never wipes toggles with nil refs.
+do
+    local _, pref = Win:PlayerTab({
+        saved = saved,
+        onPersist = persistAll,
+    })
+    if type(pref) == "table" then
+        for k, v in pairs(pref) do
+            playerTabRefs[k] = v
+        end
+    end
+end
+
 -- Restore toggles from saved config (Toggle does not run cb on first paint)
 task.defer(function()
+    hookSummonPackOpenedAutoSell()
+    setAutoSellRarityInGame(3, saved.autoSellRare)
+    setAutoSellRarityInGame(4, saved.autoSellEpic)
+    setAutoSellRarityInGame(5, saved.autoSellLegendary)
+    setAutoSellRarityInGame(6, saved.autoSellMythic)
     if saved.autoCollect and autoToggleRef then
         autoToggleRef.Set(true)
     end
@@ -717,10 +3436,67 @@ task.defer(function()
     if saved.autoReadyUp and readyToggleRef then
         readyToggleRef.Set(true)
     end
+    if saved.autoRedeemCodes and redeemToggleRef then
+        redeemToggleRef.Set(true)
+    end
+    if saved.autoStartStory and storyStartToggleRef then
+        storyStartToggleRef.Set(true)
+    end
+    if saved.autoStartDungeon and dungeonStartToggleRef then
+        dungeonStartToggleRef.Set(true)
+    end
+    if saved.autoBuyRotatingShop and rotatingShopToggleRef then
+        rotatingShopToggleRef.Set(true)
+    end
+    if saved.autoFuseUnits and fuseToggleRef then
+        fuseToggleRef.Set(true)
+    end
+    if saved.autoSummon and summonToggleRef then
+        summonToggleRef.Set(true)
+    end
+    if saved.autoStatReroll and statRerollToggleRef then
+        statRerollToggleRef.Set(true)
+    end
+    if saved.autoTraitReroll and traitRerollToggleRef then
+        traitRerollToggleRef.Set(true)
+    end
+    if saved.traitRerollSkipAnim and traitRerollSkipAnimToggleRef then
+        trySetSkipTraitRerollAnim(true)
+    end
+    if saved.autoClaimAchievements and claimAchievementsToggleRef then
+        claimAchievementsToggleRef.Set(true)
+    end
+    if saved.autoClaimDaily and claimDailyToggleRef then
+        claimDailyToggleRef.Set(true)
+    end
+    if (saved.autoClaimAchievements or saved.autoClaimDaily) then
+        task.defer(restartQuestAutoClaimLoop)
+    end
+    if playerTabRefs.walkSlider and type(playerTabRefs.walkSlider.Set) == "function" then
+        playerTabRefs.walkSlider.Set(saved.playerWalkSpeed, false)
+    end
+    if playerTabRefs.infiniteJump and type(playerTabRefs.infiniteJump.Set) == "function" then
+        playerTabRefs.infiniteJump.Set(saved.playerInfiniteJump == true)
+    end
+    if playerTabRefs.antiAfk and type(playerTabRefs.antiAfk.Set) == "function" then
+        playerTabRefs.antiAfk.Set(saved.playerAntiAfk == true)
+    end
+    if playerTabRefs.noclip and type(playerTabRefs.noclip.Set) == "function" then
+        playerTabRefs.noclip.Set(saved.playerNoclip == true)
+    end
+    if playerTabRefs.godMode and type(playerTabRefs.godMode.Set) == "function" then
+        playerTabRefs.godMode.Set(saved.playerGodMode == true)
+    end
+end)
+
+pcall(function()
+    game:BindToClose(function()
+        pcall(persistAll)
+    end)
 end)
 
 local _wf = writefile and " · settings saved" or " · read-only (no writefile)"
 Win:Status(
-    (reexecQueued and "Bonus chests · teleport queue OK" or "Bonus chests · NexusLib")
+    (reexecQueued and "Summon Heroes · teleport queue OK" or "Summon Heroes · NexusLib")
         .. _wf
 )
