@@ -11,8 +11,9 @@
   Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
 
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
-  Story: MAP SELECTION — picks MapList row (WaveData.Name), StageList row, then Start. Uses Activate + getconnections(MouseButton1Click) when available.
+  Story: MAP SELECTION — tries Systems.Queue.SetQueue:FireServer(workspace.LobbyMap.Queues child, mapKey, stage) when remote + lobby exist; else GUI MapList → StageList → Start. Activate + getconnections when needed.
   Optional: getgenv().BonusChestStoryMap; BonusChestStoryStage; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
+  Queue slot: getgenv().BonusChestSetQueueSlotIndex = 4 (Lua child index, default 4) or BonusChestSetQueueSlotName = "QueueName" under LobbyMap.Queues.
   Dungeons: RaidSelect UI — each stage is a MapList row named "Dungeon" with attribute StageNum (1–3). Same Start button in that ScreenGui.
   Optional: getgenv().BonusChestDungeonRaidKey = "Dungeon"; getgenv().BonusChestDungeonStage = 1
 
@@ -24,6 +25,7 @@
   Item / PvP shops: Systems.RotatingShops — BuyItem (RemoteEvent/Unreliable/RemoteFunction). Currency may be a Folder; CanAfford optional (server validates).
   Filter: comma-separated ItemName ids (e.g. Cupcake,TraitReroll) or * for any in-stock item you can afford.
   Optional overrides: getgenv().BonusChestRotatingShopKey, getgenv().BonusChestRotatingShopFilter (comma list or * alone).
+  If BuyItem exists but no client module: use filter * only; optional getgenv().BonusChestRotatingShopSlots = { 4, 5 } to target slots (else tries 1–16).
 
   Unit fusion: Systems.UnitFusion — PurchaseFuse(main, {3× sac}). Manual selection: exact folder Names (PlayerGui.Profile). Main: Equipped or Inventory/Units. Sacrifices: three comma-separated Names in Inventory/Units only. Empty main + empty sacrifices = auto by star filters.
   Optional: getgenv().BonusChestFuseMainUnitId, getgenv().BonusChestFuseSacrificeIds = "a,b,c"
@@ -40,7 +42,9 @@
 
   Quests UI (Achievements / Daily): Systems.Quests|Achievements|Quest modules, QuestFunction, QuestEvent (ReplicatedStorage.Systems or Remotes.Systems). Bulk + per-quest FireServer("Claim", id) using Profile / Players_Data hints. Server rejects invalid claims.
   Optional: getgenv().BonusChestClaimQuestsIntervalSec
-  If daily claim still misses: getgenv().BonusChestDailyQuestIds = { "InternalQuestKey", ... } (same for BonusChestAchievementQuestIds).
+  If daily claim still misses: getgenv().BonusChestDailyQuestIds = { "InternalQuestKey", ... } or numeric indices { 9, 10 } (same for BonusChestAchievementQuestIds).
+  Some games: Systems.Quests.ClaimQuest (RemoteFunction) :InvokeServer(questIndex) — supported alongside QuestEvent / QuestFunction.
+  Optional: getgenv().BonusChestClaimQuestNumericScanMax = 24 tries InvokeServer(1..n) when no quest ids were discovered (daily pass only).
 
   Player tab (NexusLib): walk speed slider + toggles persist to the same JSON when changed; re-open script restores them.
 ]]
@@ -653,7 +657,34 @@ local function fireShopBuy(buyEv, shopKey, slotIndex)
     end
 end
 
---- RotatingShops (Item Shop / PvP Shop): BuyItem remote + module for GetCurrentShopItems / HasStock.
+--- RotatingShops (Item Shop / PvP Shop): BuyItem remote + optional module for GetCurrentShopItems / HasStock.
+--- Some games only replicate BuyItem under Systems.RotatingShops (no ModuleScript) — then use filter * and optional getgenv().BonusChestRotatingShopSlots.
+local function findRotatingShopsModuleUnder(node)
+    if not node or not node.FindFirstChild then
+        return nil
+    end
+    local named = node:FindFirstChild("RotatingShops")
+    if named and named:IsA("ModuleScript") then
+        return named
+    end
+    for _, ch in ipairs(node:GetChildren()) do
+        if ch:IsA("ModuleScript") then
+            return ch
+        end
+    end
+    for _, d in ipairs(node:GetDescendants()) do
+        if d:IsA("ModuleScript") and d.Name == "RotatingShops" then
+            return d
+        end
+    end
+    for _, d in ipairs(node:GetDescendants()) do
+        if d:IsA("ModuleScript") then
+            return d
+        end
+    end
+    return nil
+end
+
 local function resolveRotatingShopsBuy()
     local systems = getSystemsFolder()
     if not systems then
@@ -669,17 +700,22 @@ local function resolveRotatingShopsBuy()
         modScript = node
         buyEv = node.Parent and node.Parent:FindFirstChild("BuyItem")
     elseif node:IsA("Folder") then
-        modScript = node:FindFirstChild("RotatingShops") or node:FindFirstChildWhichIsA("ModuleScript")
+        modScript = findRotatingShopsModuleUnder(node)
         buyEv = node:FindFirstChild("BuyItem")
+    else
+        buyEv = node:FindFirstChild("BuyItem")
+        modScript = findRotatingShopsModuleUnder(node)
     end
-    if not (buyEv and isShopBuyRemote(buyEv) and modScript and modScript:IsA("ModuleScript")) then
+    if not buyEv or not isShopBuyRemote(buyEv) then
         return nil, nil
     end
-    local ok, mod = pcall(require, modScript)
-    if not ok or type(mod) ~= "table" then
-        return nil, buyEv
+    if modScript and modScript:IsA("ModuleScript") then
+        local ok, mod = pcall(require, modScript)
+        if ok and type(mod) == "table" then
+            return mod, buyEv
+        end
     end
-    return mod, buyEv
+    return nil, buyEv
 end
 
 --- Currency is sometimes a Folder with an inner ModuleScript, or named Economy / Wallet.
@@ -874,7 +910,34 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
         return 0, "no_remote"
     end
     if not rotMod or type(rotMod) ~= "table" then
-        return 0, "no_module"
+        if not buyAny then
+            return 0, "no_module_filter"
+        end
+        local slots = nil
+        if getgenv and type(getgenv().BonusChestRotatingShopSlots) == "table" then
+            slots = getgenv().BonusChestRotatingShopSlots
+        end
+        local bought = 0
+        if type(slots) == "table" and #slots > 0 then
+            for _, si in ipairs(slots) do
+                local i = tonumber(si)
+                if i and i >= 1 and i <= 32 then
+                    fireShopBuy(buyEv, shopKey, math.floor(i))
+                    bought = bought + 1
+                    task.wait(1.05)
+                end
+            end
+        else
+            for i = 1, 16 do
+                fireShopBuy(buyEv, shopKey, i)
+                bought = bought + 1
+                task.wait(1.05)
+            end
+        end
+        if bought > 0 then
+            return bought, "blind"
+        end
+        return 0, "nothing"
     end
     local items = rotatingShopGetItems(rotMod, shopKey)
     if type(items) ~= "table" then
@@ -1300,6 +1363,20 @@ local function findQuestEventRemote()
     return nil
 end
 
+--- ReplicatedStorage.Systems.Quests.ClaimQuest (RemoteFunction) — InvokeServer(questIndex) per Cobalt-style dumps.
+local function findQuestsClaimQuestRemoteFunction()
+    for _, systems in ipairs(getSystemsFolderCandidates()) do
+        local quests = systems:FindFirstChild("Quests")
+        if quests then
+            local rf = quests:FindFirstChild("ClaimQuest")
+            if rf and rf:IsA("RemoteFunction") then
+                return rf
+            end
+        end
+    end
+    return nil
+end
+
 local function profileOrDataRootsForQuests()
     local roots = {}
     local prof = getPlayerProfileFolder()
@@ -1405,12 +1482,16 @@ local function collectQuestIdsForCategory(category)
             for _, x in ipairs(g.BonusChestDailyQuestIds) do
                 if type(x) == "string" then
                     add(x)
+                elseif type(x) == "number" and x == math.floor(x) and x >= 0 then
+                    add(tostring(x))
                 end
             end
         elseif category == "achievement" and type(g.BonusChestAchievementQuestIds) == "table" then
             for _, x in ipairs(g.BonusChestAchievementQuestIds) do
                 if type(x) == "string" then
                     add(x)
+                elseif type(x) == "number" and x == math.floor(x) and x >= 0 then
+                    add(tostring(x))
                 end
             end
         end
@@ -1495,6 +1576,47 @@ local function tryClaimQuestCategoryOnce(category)
                 pcall(function()
                     rf:InvokeServer("Claim", qid)
                 end)
+            end
+        end
+    end
+    do
+        local cq = findQuestsClaimQuestRemoteFunction()
+        if cq then
+            used = true
+            pcall(function()
+                cq:InvokeServer()
+            end)
+            if category == "achievement" then
+                pcall(function()
+                    cq:InvokeServer("ClaimAllAchievements")
+                end)
+            else
+                pcall(function()
+                    cq:InvokeServer("ClaimAllDaily")
+                end)
+            end
+            for i = 1, math.min(#perIds, cap) do
+                local qid = perIds[i]
+                local n = tonumber(qid)
+                pcall(function()
+                    if n ~= nil then
+                        cq:InvokeServer(n)
+                    end
+                end)
+                pcall(function()
+                    cq:InvokeServer(qid)
+                end)
+            end
+            if #perIds == 0 and category == "daily" and getgenv then
+                local mx = getgenv().BonusChestClaimQuestNumericScanMax
+                if type(mx) == "number" then
+                    mx = math.clamp(math.floor(mx), 1, 64)
+                    for j = 1, mx do
+                        pcall(function()
+                            cq:InvokeServer(j)
+                        end)
+                    end
+                end
             end
         end
     end
@@ -2514,7 +2636,65 @@ local function guiActivate(inst)
     end
 end
 
---- Clicks map row → stage row → Start when the story map-select UI is visible (Queue:SetQueue path).
+--- Systems.Queue.SetQueue (RemoteEvent) — FireServer(queueSlotInstance, mapKey, stageNum); Cobalt-style lobby API.
+local function resolveSetQueueRemote()
+    local systems = getSystemsFolder()
+    if not systems then
+        return nil
+    end
+    local qf = systems:FindFirstChild("Queue")
+    if not qf then
+        return nil
+    end
+    local ev = qf:FindFirstChild("SetQueue")
+    if
+        ev
+        and (
+            ev:IsA("RemoteEvent")
+            or ev:IsA("UnreliableRemoteEvent")
+            or ev:IsA("RemoteFunction")
+        )
+    then
+        return ev
+    end
+    return nil
+end
+
+local function findLobbyMapWithQueues()
+    local lm = workspace:FindFirstChild("LobbyMap")
+    if lm and lm:FindFirstChild("Queues") then
+        return lm
+    end
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d.Name == "LobbyMap" and d:FindFirstChild("Queues") then
+            return d
+        end
+    end
+    return nil
+end
+
+--- Instance passed to SetQueue — default 4th child of LobbyMap.Queues (matches common Cobalt dumps).
+local function resolveSetQueueLobbySlotInstance()
+    local lm = findLobbyMapWithQueues()
+    local queues = lm and lm:FindFirstChild("Queues")
+    if not queues then
+        return nil
+    end
+    if getgenv and type(getgenv().BonusChestSetQueueSlotName) == "string" and #getgenv().BonusChestSetQueueSlotName > 0 then
+        return queues:FindFirstChild(getgenv().BonusChestSetQueueSlotName)
+    end
+    local slotIdx = 4
+    if getgenv and type(getgenv().BonusChestSetQueueSlotIndex) == "number" then
+        slotIdx = math.floor(getgenv().BonusChestSetQueueSlotIndex)
+    end
+    local ch = queues:GetChildren()
+    if slotIdx >= 1 and slotIdx <= #ch then
+        return ch[slotIdx]
+    end
+    return nil
+end
+
+--- Clicks map row → stage row → Start when the story map-select UI is visible; prefers SetQueue remote when available.
 local function tryAutoStartStoryOnce(mapKey, stageNum)
     if type(mapKey) ~= "string" or #mapKey == 0 then
         return false, "bad_map"
@@ -2524,6 +2704,26 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
         return false, "bad_stage"
     end
     stageNum = math.floor(stageNum)
+
+    local setEv = resolveSetQueueRemote()
+    if setEv then
+        local slotInst = resolveSetQueueLobbySlotInstance()
+        if slotInst then
+            local okFire
+            if setEv:IsA("RemoteFunction") then
+                okFire = select(1, pcall(function()
+                    setEv:InvokeServer(slotInst, mapKey, stageNum)
+                end))
+            else
+                okFire = select(1, pcall(function()
+                    setEv:FireServer(slotInst, mapKey, stageNum)
+                end))
+            end
+            if okFire then
+                return true, nil
+            end
+        end
+    end
 
     local mapList, mapEntry = findStoryMapRow(mapKey)
     if not mapList or not mapEntry then
@@ -3253,7 +3453,7 @@ storyStageInputRef = TBattle:Input(
     end
 )
 
-storyStartToggleRef = TBattle:Toggle("Auto start story", "While map-select UI is visible (~0.55s)", saved.autoStartStory, function(on)
+storyStartToggleRef = TBattle:Toggle("Auto start story", "Lobby: Queue.SetQueue if present; else map UI · ~0.55s", saved.autoStartStory, function(on)
     G.story = G.story + 1
     local g = G.story
     if on then
@@ -3718,7 +3918,7 @@ end)
 
 local TShop = Win:Tab("🏪", "Shop")
 TShop:Section("Rotating shops")
-TShop:Label("RotatingShops.BuyItem · ItemName ids (Cupcake, TraitReroll…). * = any affordable item in stock.")
+TShop:Label("RotatingShops.BuyItem · Cupcake, TraitReroll… or * · no client module: * only + optional getgenv().BonusChestRotatingShopSlots = {4}.")
 
 rotatingShopDropdownRef = TShop:Dropdown(
     "Shop",
@@ -3762,7 +3962,9 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
                     filt = rotatingShopFilterInputRef.Get() or filt
                 end
                 local n, why = tryRotatingShopAutoBuy(shopKey, filt)
-                if n > 0 then
+                if n > 0 and why == "blind" then
+                    Win:Notify("Shop", ("Sent %d buy request(s) (no shop module — server validates)"):format(n), 3, "success")
+                elseif n > 0 then
                     Win:Notify("Shop", ("Bought %d item(s)"):format(n), 3, "success")
                 elseif why == "no_filter" then
                     local t = os.clock()
@@ -3770,11 +3972,23 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
                         G.lastShopHint = t
                         Win:Status("Shop: set filter (* or ItemName list) to auto-buy")
                     end
-                elseif why == "no_remote" or why == "no_module" then
+                elseif why == "no_module_filter" then
+                    local tt = os.clock()
+                    if tt - G.lastShopHint > 10 then
+                        G.lastShopHint = tt
+                        Win:Status("Shop: no item list API — set filter to * or getgenv().BonusChestRotatingShopSlots = {4}")
+                    end
+                elseif why == "no_remote" then
                     local t = os.clock()
                     if t - G.lastShopHint > 10 then
                         G.lastShopHint = t
-                        Win:Status("Shop: RotatingShops module or BuyItem remote missing")
+                        Win:Status("Shop: BuyItem remote not found under Systems.RotatingShops")
+                    end
+                elseif why == "no_module" then
+                    local t = os.clock()
+                    if t - G.lastShopHint > 10 then
+                        G.lastShopHint = t
+                        Win:Status("Shop: RotatingShops module missing (named buys need it)")
                     end
                 elseif why == "no_items" then
                     local t = os.clock()
@@ -4169,7 +4383,7 @@ end
 
 local TRewards = Win:Tab("✨", "Rewards")
 TRewards:Section("Quests (Achievements & Daily)")
-TRewards:Label("QuestEvent + Profile/Data quest ids (Claim per id) · bulk ClaimAll* · server ignores invalid.")
+TRewards:Label("QuestEvent / QuestFunction / Systems.Quests.ClaimQuest (Invoke) · Profile ids or getgenv lists (strings or numbers e.g. 9).")
 
 claimQuestsIntervalInputRef = TRewards:Input(
     "Interval (sec)",
