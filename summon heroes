@@ -23,7 +23,7 @@
     getgenv().BonusChestPromoCodes = { "CODE1", "CODE2" }  or edit PROMO_CODES_EDIT below.
 
   Item / PvP shops: Systems.RotatingShops — BuyItem (RemoteEvent/Unreliable/RemoteFunction). Currency may be a Folder; CanAfford optional (server validates).
-  Filter: comma-separated ItemName ids (e.g. Cupcake,TraitReroll) or * for any in-stock item you can afford.
+  Filter: multi-select dropdown + optional extra comma names; * for any in-stock affordable item (edit ROTATING_SHOP_ITEM_OPTIONS in script).
   Optional overrides: getgenv().BonusChestRotatingShopKey, getgenv().BonusChestRotatingShopFilter (comma list or * alone).
   If BuyItem exists but no client module: use filter * only; optional getgenv().BonusChestRotatingShopSlots = { 4, 5 } to target slots (else tries 1–16).
 
@@ -2443,6 +2443,122 @@ local ROTATING_SHOP_OPTIONS = {
     { text = "PvP Shop", value = "PvPShop" },
 }
 
+--- ItemName ids for multi-select (edit for your game). "*" = any affordable in-stock item (needs RotatingShops module).
+local ROTATING_SHOP_ITEM_OPTIONS = {
+    "*",
+    "TraitReroll",
+    "Cupcake",
+    "Candy",
+    "Donut",
+    "Cookie",
+    "Cake",
+    "SummonTicket",
+    "MythicBanner",
+    "PVP",
+    "PvpRefresh",
+    "GoldPack",
+    "GemPack",
+    "Food",
+    "IceCream",
+    "Lollipop",
+}
+
+local function rotatingShopKnownValueToIndex()
+    local map = {}
+    for i, opt in ipairs(ROTATING_SHOP_ITEM_OPTIONS) do
+        local val = type(opt) == "table" and (opt.value or opt[2]) or opt
+        map[string.lower(tostring(val))] = i
+    end
+    return map
+end
+
+--- Default multi-indices + optional extra comma string for unknown names (preserves saved config).
+local function rotatingShopSplitSavedIntoKnownAndExtra(savedCsv)
+    local known = rotatingShopKnownValueToIndex()
+    local s = type(savedCsv) == "string" and (savedCsv:match("^%s*(.-)%s*$") or "") or ""
+    if #s == 0 or s == "*" then
+        return { 1 }, ""
+    end
+    local indices = {}
+    local seen = {}
+    local extras = {}
+    for part in string.gmatch(s, "[^,]+") do
+        local k = (part:match("^%s*(.-)%s*$") or "")
+        if #k > 0 then
+            local idx = known[string.lower(k)]
+            if idx then
+                if not seen[idx] then
+                    seen[idx] = true
+                    indices[#indices + 1] = idx
+                end
+            else
+                extras[#extras + 1] = k
+            end
+        end
+    end
+    if #indices == 0 and #extras == 0 then
+        return { 1 }, ""
+    end
+    if #indices == 0 then
+        return { 1 }, table.concat(extras, ",")
+    end
+    return indices, table.concat(extras, ",")
+end
+
+local function rotatingShopFilterStringFromValues(values)
+    if type(values) ~= "table" or #values == 0 then
+        return "*"
+    end
+    local hasStar = false
+    local parts = {}
+    for _, v in ipairs(values) do
+        local sv = tostring(v)
+        if sv == "*" then
+            hasStar = true
+        else
+            parts[#parts + 1] = sv
+        end
+    end
+    if hasStar and #parts == 0 then
+        return "*"
+    end
+    if hasStar then
+        return "*"
+    end
+    return table.concat(parts, ",")
+end
+
+local function mergeRotatingShopExtra(base, extra)
+    local b = type(base) == "string" and (base:match("^%s*(.-)%s*$") or "") or ""
+    local e = type(extra) == "string" and (extra:match("^%s*(.-)%s*$") or "") or ""
+    if #e == 0 then
+        return b
+    end
+    if #b == 0 or b == "*" then
+        return e
+    end
+    return b .. "," .. e
+end
+
+local function readRotatingShopFilterString(multiRef, inputRef)
+    local vals
+    if multiRef and type(multiRef.Get) == "function" then
+        _, vals = multiRef.Get()
+    end
+    local fromMulti = rotatingShopFilterStringFromValues(vals)
+    if not fromMulti or fromMulti == "" then
+        fromMulti = "*"
+    end
+    local extra = ""
+    if inputRef and type(inputRef.Get) == "function" then
+        local s = inputRef.Get()
+        if type(s) == "string" then
+            extra = s
+        end
+    end
+    return mergeRotatingShopExtra(fromMulti, extra)
+end
+
 local function rotatingShopOptionIndex(key)
     if key == "PvPShop" then
         return 2
@@ -3082,6 +3198,7 @@ local dungeonRaidKeyInputRef
 local dungeonStageDropdownRef
 local rotatingShopToggleRef
 local rotatingShopDropdownRef
+local rotatingShopItemsMultiRef
 local rotatingShopFilterInputRef
 local fuseToggleRef
 local fuseMinInputRef
@@ -3158,11 +3275,8 @@ persistAll = function()
         end
     end
     local rFilter = saved.rotatingShopFilter
-    if rotatingShopFilterInputRef then
-        local s = rotatingShopFilterInputRef.Get()
-        if type(s) == "string" then
-            rFilter = s
-        end
+    if rotatingShopItemsMultiRef or rotatingShopFilterInputRef then
+        rFilter = readRotatingShopFilterString(rotatingShopItemsMultiRef, rotatingShopFilterInputRef)
     end
     local fMin = fuseMinInputRef and tonumber(fuseMinInputRef.Get()) or saved.fuseMinStars
     local fMax = fuseMaxInputRef and tonumber(fuseMaxInputRef.Get()) or saved.fuseMaxStars
@@ -3951,7 +4065,7 @@ end)
 
 local TShop = Win:Tab("🏪", "Shop")
 TShop:Section("Rotating shops")
-TShop:Label("RotatingShops.BuyItem · Cupcake, TraitReroll… or * · no client module: * only + optional getgenv().BonusChestRotatingShopSlots = {4}.")
+TShop:Label("RotatingShops.BuyItem · multi-select items + optional extra names · * = any in stock (needs module). Blind: getgenv().BonusChestRotatingShopSlots.")
 
 rotatingShopDropdownRef = TShop:Dropdown(
     "Shop",
@@ -3963,15 +4077,28 @@ rotatingShopDropdownRef = TShop:Dropdown(
     end
 )
 
-rotatingShopFilterInputRef = TShop:Input(
-    "Buy filter",
-    "Comma list or * (e.g. Cupcake,Candy,TraitReroll)",
-    "Cupcake,Donut",
-    saved.rotatingShopFilter,
-    function()
-        persistAll()
-    end
-)
+do
+    local shopPickIndices, shopExtraCsv = rotatingShopSplitSavedIntoKnownAndExtra(saved.rotatingShopFilter)
+    rotatingShopItemsMultiRef = TShop:Dropdown(
+        "Items to buy",
+        "Multi-select checkboxes · * alone = any affordable item in stock",
+        ROTATING_SHOP_ITEM_OPTIONS,
+        shopPickIndices,
+        function()
+            persistAll()
+        end,
+        true
+    )
+    rotatingShopFilterInputRef = TShop:Input(
+        "Extra item names",
+        "Optional comma list appended (e.g. game-specific ids not in dropdown)",
+        "CustomItem",
+        shopExtraCsv,
+        function()
+            persistAll()
+        end
+    )
+end
 
 rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s between purchases", saved.autoBuyRotatingShop, function(on)
     G.shop = G.shop + 1
@@ -3991,8 +4118,8 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
                 local filt = saved.rotatingShopFilter
                 if getgenv and type(getgenv().BonusChestRotatingShopFilter) == "string" then
                     filt = getgenv().BonusChestRotatingShopFilter
-                elseif rotatingShopFilterInputRef then
-                    filt = rotatingShopFilterInputRef.Get() or filt
+                elseif rotatingShopItemsMultiRef or rotatingShopFilterInputRef then
+                    filt = readRotatingShopFilterString(rotatingShopItemsMultiRef, rotatingShopFilterInputRef)
                 end
                 local n, why = tryRotatingShopAutoBuy(shopKey, filt)
                 if n > 0 and why == "blind" then
