@@ -2,7 +2,8 @@
   Summon Heroes — FIXED SAVE/LOAD + GUI CLEANUP + full automation (2026). One NexusLib window (Win:Window{ title, width, height }).
   JSON: BonusChests_config.json — loadConfig() at script start and again right before NexusLib:Window (re-exec = fresh read from disk). persistAll (debounced ~0.6s) uses persistToggleBool; persistAll(true) flushes immediately (e.g. BindToClose). After save, `saved` is merged from file for same-session reads.
   Re-execute: cleanupOldNexusLibGuiBeforeWindow() removes NexusLib_* ScreenGuis only (avoid blanket PlayerGui deletes by "Window"/"Main"). loadConfig() each run; task.defer restores toggles from saved (true/false). Do not destroy CoreGui by name.
-  Loop cancellation: each auto feature bumps a generation counter so the previous task.spawn loop exits (no stuck/overlapping loops).
+  Loop cancellation: each toggle bumps G.* so the prior loop for that feature exits; re-exec also bumps getgenv()._BonusChestUiGen so all prior UI loops stop (G is re-created each run).
+  Re-exec listeners: OnTeleport / CharacterAdded / re-arm loop disconnect or use separate gens so they do not stack.
     • G.loop — bonus chests auto   • G.revive — auto revive   • G.ready — map ready
     • G.story / G.dungeon — story & dungeon auto-start   • stageVoteLoopId — round-end Next / Retry vote
     • G.fuse / G.summon / G.shop / G.statReroll / G.traitReroll / G.questClaim — units, shop, rerolls, claims
@@ -360,6 +361,28 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LP = Players.LocalPlayer
 
+--- Re-exec: singleton state in getgenv/_G so connections and loops do not stack (major lag after teleport re-runs).
+local function bonusChestPersist()
+    return (getgenv and getgenv()) or _G
+end
+
+local function bonusChestBumpRearmGen()
+    local st = bonusChestPersist()
+    st._BonusChestRearmGen = (st._BonusChestRearmGen or 0) + 1
+    return st._BonusChestRearmGen
+end
+
+--- Bumped once per NexusLib UI load; previous run's auto task.spawn loops exit (G.* is local per chunk — re-exec could not cancel them).
+local function bonusChestBumpUiGen()
+    local st = bonusChestPersist()
+    st._BonusChestUiGen = (st._BonusChestUiGen or 0) + 1
+    return st._BonusChestUiGen
+end
+
+local function bonusChestUiAlive(capturedGen)
+    return capturedGen == ((bonusChestPersist()._BonusChestUiGen or 0))
+end
+
 -- ── Auto re-exec (same idea as AniPixels): arm queue on load, re-queue on TeleportState.RequestedByServer, sync _G.BonusChest_AutoRejoin, periodic re-arm when toggled back on
 local function syncBonusChestRejoinFlag()
     pcall(function()
@@ -390,7 +413,14 @@ end)
 syncBonusChestRejoinFlag()
 
 pcall(function()
-    LP.OnTeleport:Connect(function(teleportState)
+    local st = bonusChestPersist()
+    if st._BonusChestOnTeleportConn then
+        pcall(function()
+            st._BonusChestOnTeleportConn:Disconnect()
+        end)
+        st._BonusChestOnTeleportConn = nil
+    end
+    st._BonusChestOnTeleportConn = LP.OnTeleport:Connect(function(teleportState)
         if teleportState ~= Enum.TeleportState.RequestedByServer then
             return
         end
@@ -412,19 +442,22 @@ pcall(function()
     end)
 end)
 
-task.spawn(function()
-    local wasOn = saved.queueOnTeleport ~= false
-        and not (getgenv and getgenv().BonusChestNoQueue == true)
-    while true do
-        task.wait(2)
-        syncBonusChestRejoinFlag()
-        local on = saved.queueOnTeleport ~= false and not (getgenv and getgenv().BonusChestNoQueue == true)
-        if on and not wasOn then
-            pcall(armBonusChestQueue)
+do
+    local rearmGen = bonusChestBumpRearmGen()
+    task.spawn(function()
+        local wasOn = saved.queueOnTeleport ~= false
+            and not (getgenv and getgenv().BonusChestNoQueue == true)
+        while rearmGen == (bonusChestPersist()._BonusChestRearmGen or 0) do
+            task.wait(2)
+            syncBonusChestRejoinFlag()
+            local on = saved.queueOnTeleport ~= false and not (getgenv and getgenv().BonusChestNoQueue == true)
+            if on and not wasOn then
+                pcall(armBonusChestQueue)
+            end
+            wasOn = on
         end
-        wasOn = on
-    end
-end)
+    end)
+end
 
 --- Lobby if game does not mark an active round (attribute may be absent).
 local function isInLobby()
@@ -3527,10 +3560,19 @@ local QUEUE_TELEPORT_SKIP_DIST = 72
 --- After first queue snap, do not TP again until respawn (unless BonusChestStoryQueueReteleport / dungeon equivalent).
 local storyQueueLobbyTeleportUsed = false
 local dungeonQueueLobbyTeleportUsed = false
-LP.CharacterAdded:Connect(function()
-    storyQueueLobbyTeleportUsed = false
-    dungeonQueueLobbyTeleportUsed = false
-    _remoteCache = {}  -- clear cache so remotes are re-found after respawn/reload
+pcall(function()
+    local st = bonusChestPersist()
+    if st._BonusChestCharacterAddedConn then
+        pcall(function()
+            st._BonusChestCharacterAddedConn:Disconnect()
+        end)
+        st._BonusChestCharacterAddedConn = nil
+    end
+    st._BonusChestCharacterAddedConn = LP.CharacterAdded:Connect(function()
+        storyQueueLobbyTeleportUsed = false
+        dungeonQueueLobbyTeleportUsed = false
+        _remoteCache = {}  -- clear cache so remotes are re-found after respawn/reload
+    end)
 end)
 
 local function hrpWithinStudsOfQueueSlot(slotModel, maxDist)
@@ -4174,6 +4216,7 @@ end
 local Win
 local persistAll
 ;(function()
+local UI_RUN_GEN = bonusChestBumpUiGen()
 cleanupOldNexusLibGuiBeforeWindow()
 -- Re-read JSON from disk immediately before building UI (each re-execution uses latest save file).
 saved = loadConfig()
@@ -4597,12 +4640,12 @@ local G = {
 local function runAutoBonusChestLoop(gen)
     task.spawn(function()
         Win:Status("Auto Bonus Chests → ENABLED")
-        while gen == G.loop do
+        while gen == G.loop and bonusChestUiAlive(UI_RUN_GEN) do
             if isBonusChestLobbyForAutoCollect() then
                 local anyCollected = false
                 local parts = CollectionService:GetTagged("BonusChestPart")
                 for _, chestInst in ipairs(parts) do
-                    if gen ~= G.loop then
+                    if gen ~= G.loop or not bonusChestUiAlive(UI_RUN_GEN) then
                         break
                     end
                     if chestInst and chestInst.Parent and chestInst:IsDescendantOf(workspace) then
@@ -4627,7 +4670,7 @@ local function runAutoBonusChestLoop(gen)
                         end
                     end
                 end
-                if gen ~= G.loop then
+                if gen ~= G.loop or not bonusChestUiAlive(UI_RUN_GEN) then
                     break
                 end
                 task.wait(anyCollected and 0.8 or 1.5)
@@ -4664,7 +4707,7 @@ reviveToggleRef = TBattle:Toggle("Auto revive", "Fire revive on equipped slots e
     local myR = G.revive
     if on then
         task.spawn(function()
-            while myR == G.revive do
+            while myR == G.revive and bonusChestUiAlive(UI_RUN_GEN) do
                 if not getTryReviveRemote() or not getEquippedFolder() then
                     Win:Status("Revive: wait for Profile / Waves")
                 else
@@ -4685,7 +4728,7 @@ readyToggleRef = TBattle:Toggle("Auto ready up", "Checks ~1s · same as Ready in
     local myReady = G.ready
     if on then
         task.spawn(function()
-            while myReady == G.ready do
+            while myReady == G.ready and bonusChestUiAlive(UI_RUN_GEN) do
                 fireMapReady()
                 task.wait(1)
             end
@@ -4726,7 +4769,7 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "TP to pad → map/stag
     local g = G.story
     if on then
         task.spawn(function()
-            while g == G.story do
+            while g == G.story and bonusChestUiAlive(UI_RUN_GEN) do
                 local mapKey = saved.storyMapKey
                 if getgenv and type(getgenv().BonusChestStoryMap) == "string" and #getgenv().BonusChestStoryMap > 0 then
                     mapKey = getgenv().BonusChestStoryMap
@@ -4836,7 +4879,7 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
     local g = G.dungeon
     if on then
         task.spawn(function()
-            while g == G.dungeon do
+            while g == G.dungeon and bonusChestUiAlive(UI_RUN_GEN) do
                 local raidKey = saved.dungeonRaidKey
                 if getgenv and type(getgenv().BonusChestDungeonRaidKey) == "string" and #getgenv().BonusChestDungeonRaidKey > 0 then
                     raidKey = getgenv().BonusChestDungeonRaidKey
@@ -4888,7 +4931,7 @@ local function startStageVoteLoop()
     local thisId = stageVoteLoopId
     Win:Status("Stage Auto-Vote → ENABLED")
     task.spawn(function()
-        while thisId == stageVoteLoopId do
+        while thisId == stageVoteLoopId and bonusChestUiAlive(UI_RUN_GEN) do
             local timerActive = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
             local uiNext = roundEndNextUiVisible()
             local uiRetry = roundEndRetryUiVisible()
@@ -5090,7 +5133,7 @@ fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile i
     local g = G.fuse
     if on then
         task.spawn(function()
-            while g == G.fuse do
+            while g == G.fuse and bonusChestUiAlive(UI_RUN_GEN) do
                 local o = {
                     minStars = saved.fuseMinStars,
                     maxStars = saved.fuseMaxStars,
@@ -5233,7 +5276,7 @@ summonToggleRef = TUnits:Toggle("Auto summon heroes", "Every ~1.2s · same as sh
     local g = G.summon
     if on then
         task.spawn(function()
-            while g == G.summon do
+            while g == G.summon and bonusChestUiAlive(UI_RUN_GEN) do
                 local _, pack = summonPackDropdownRef.Get()
                 pack = (type(pack) == "string" and pack) or saved.summonPack
                 if getgenv and type(getgenv().BonusChestSummonPack) == "string" and #getgenv().BonusChestSummonPack > 0 then
@@ -5300,7 +5343,7 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
     local g = G.shop
     if on then
         task.spawn(function()
-            while g == G.shop do
+            while g == G.shop and bonusChestUiAlive(UI_RUN_GEN) do
                 local shopKey = saved.rotatingShopKey
                 if getgenv and type(getgenv().BonusChestRotatingShopKey) == "string" and #getgenv().BonusChestRotatingShopKey > 0 then
                     shopKey = getgenv().BonusChestRotatingShopKey
@@ -5488,7 +5531,7 @@ statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls 
     if on then
         task.spawn(function()
             local rolls = 0
-            while g == G.statReroll do
+            while g == G.statReroll and bonusChestUiAlive(UI_RUN_GEN) do
                 local maxR = tonumber(statRerollMaxRollsInputRef.Get()) or saved.statRerollMaxRolls
                 if getgenv and type(getgenv().BonusChestStatRerollMaxRolls) == "number" then
                     maxR = getgenv().BonusChestStatRerollMaxRolls
@@ -5651,7 +5694,7 @@ traitRerollToggleRef = TRoll:Toggle("Auto trait reroll", "Until goal: stops when
         end
         task.spawn(function()
             local rolls = 0
-            while g == G.traitReroll do
+            while g == G.traitReroll and bonusChestUiAlive(UI_RUN_GEN) do
                 local maxR = tonumber(traitRerollMaxRollsInputRef.Get()) or saved.traitRerollMaxRolls
                 if getgenv and type(getgenv().BonusChestTraitRerollMaxRolls) == "number" then
                     maxR = getgenv().BonusChestTraitRerollMaxRolls
@@ -5771,7 +5814,7 @@ local function restartQuestAutoClaimLoop()
         return
     end
     task.spawn(function()
-        while g == G.questClaim do
+        while g == G.questClaim and bonusChestUiAlive(UI_RUN_GEN) do
             local a = claimAchievementsToggleRef and claimAchievementsToggleRef.Get()
             local d = claimDailyToggleRef and claimDailyToggleRef.Get()
             if not a and not d then
@@ -5825,7 +5868,7 @@ redeemToggleRef = TRewards:Toggle("Auto redeem codes", "Retry full list every 2 
     local myRedeem = G.redeem
     if on then
         task.spawn(function()
-            while myRedeem == G.redeem do
+            while myRedeem == G.redeem and bonusChestUiAlive(UI_RUN_GEN) do
                 local ok, why = redeemPromoCodesOnce()
                 if why == "no_remote" then
                     Win:Status("Codes: PromoCodes missing")
@@ -6002,6 +6045,11 @@ task.defer(function()
 end)
 
 pcall(function()
+    local st = bonusChestPersist()
+    if st._BonusChestBindToClose then
+        return
+    end
+    st._BonusChestBindToClose = true
     game:BindToClose(function()
         pcall(function()
             persistAll(true)
