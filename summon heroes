@@ -4286,11 +4286,10 @@ local function getBonusChestWorldCFrame(inst)
     return nil
 end
 
--- ── NexusLib UI: IIFE — locals here are not in the script chunk (Luau 200-register limit per function) ──
--- cleanup for prior NexusLib_* guis lives inside the IIFE (not a top-level `local function`) so the main chunk stays under the 200-register cap.
+-- ── NexusLib UI: IIFE — Win/persistAll must live INSIDE this function, not the script chunk (main chunk already at ~200 locals). ──
+;(function()
 local Win
 local persistAll
-;(function()
 local UI_RUN_GEN = bonusChestBumpUiGen()
 do
     pcall(function()
