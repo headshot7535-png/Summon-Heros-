@@ -2786,6 +2786,51 @@ local function findStartButtonInPlayerGui(preferScreenGui)
 end
 
 --- Story MapSelect: one row per map key; rows do not use StageNum (RaidSelect does).
+-- Normalise a string for loose comparison (lowercase, strip spaces/punctuation).
+local function normaliseMapName(s)
+    return tostring(s or ""):lower():gsub("[%s%-_]+", "")
+end
+
+-- Map display text → WaveData key lookup (add entries as new maps release).
+local DISPLAY_TO_WAVE_KEY = {
+    ["rookieisland"]      = "RookieIsland",
+    ["volcanofortress"]   = "VolcanoFortress",
+    ["frozenglacier"]     = "FrozenGlacier",
+    ["calamitycanyon"]    = "CalamityCanyon",
+    ["sakuravillage"]     = "SakuraVillage",
+    ["evercrestacademy"]  = "EvercrestAcademy",
+    ["dualwielder"]       = "DualWielder",
+}
+
+-- Collect ALL text from a GuiObject's TextLabels / TextButtons.
+local function rowDisplayText(obj)
+    local parts = {}
+    for _, d in ipairs(obj:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and #(d.Text or "") > 0 then
+            parts[#parts + 1] = d.Text
+        end
+    end
+    return table.concat(parts, " ")
+end
+
+-- Returns true if a map row's text content matches the given mapKey.
+-- Matches: exact Name, normalised Name, display-name ↔ WaveData key, or substring.
+local function mapRowMatchesKey(row, mapKey)
+    if not row or not mapKey then return false end
+    -- 1. Exact Name match (old behaviour, kept for future-proofing)
+    if row.Name == mapKey then return true end
+    -- 2. Normalised Name match
+    local nk = normaliseMapName(mapKey)
+    if normaliseMapName(row.Name) == nk then return true end
+    -- 3. Match by text label content inside the row
+    local txt = normaliseMapName(rowDisplayText(row))
+    if #txt > 0 and (txt:find(nk, 1, true) or nk:find(txt, 1, true)) then return true end
+    -- 4. Reverse: display text of row matches a known alias of mapKey
+    local alias = DISPLAY_TO_WAVE_KEY[txt]
+    if alias and normaliseMapName(alias) == nk then return true end
+    return false
+end
+
 local function findStoryMapRow(mapKey)
     local pg = LP:FindFirstChild("PlayerGui")
     if not pg then
@@ -2795,9 +2840,36 @@ local function findStoryMapRow(mapKey)
         if mapList.Name == "MapList" and mapList:IsA("GuiObject") and guiObjectShownOnScreen(mapList) then
             local holder = mapListInnerList(mapList)
             if holder then
-                local e = holder:FindFirstChild(mapKey)
-                if e and e:IsA("GuiObject") and e:GetAttribute("StageNum") == nil then
-                    return mapList, e
+                -- First: fast exact-name hit
+                local exact = holder:FindFirstChild(mapKey)
+                if exact and exact:IsA("GuiObject") and exact:GetAttribute("StageNum") == nil then
+                    return mapList, exact
+                end
+                -- Second: iterate all rows and match by name OR text content
+                for _, row in ipairs(holder:GetChildren()) do
+                    if row:IsA("GuiObject") and row:GetAttribute("StageNum") == nil then
+                        local nm = row.Name
+                        -- skip layout/padding/utility elements
+                        if nm ~= "UIPadding" and nm ~= "UIListLayout" and nm ~= "UIGridLayout"
+                            and nm ~= "UIAspectRatioConstraint" and not nm:match("^UI") then
+                            if mapRowMatchesKey(row, mapKey) then
+                                return mapList, row
+                            end
+                        end
+                    end
+                end
+                -- Third: if only 1 non-UI child exists and map key is any story map, return it
+                -- (handles ComingSoonMap placeholder being the only visible row)
+                local validRows = {}
+                for _, row in ipairs(holder:GetChildren()) do
+                    if row:IsA("GuiObject") and row:GetAttribute("StageNum") == nil
+                        and not row.Name:match("^UI") then
+                        validRows[#validRows + 1] = row
+                    end
+                end
+                if #validRows == 1 then
+                    -- Only one row: treat it as the target map (player opened right UI)
+                    return mapList, validRows[1]
                 end
             end
         end
@@ -3499,28 +3571,37 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
         end
     end
 
-    -- Map/stage UI is tied to the Story pad; queue teleport *before* picks confuses the client. Nudge pad first.
+    -- Always fire the pad ProximityPrompt first so the MapSelect UI populates its rows.
+    -- The game dynamically adds map rows only after the pad interaction — searching before this always fails.
     if not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
+        -- Quick TP to pad position so prompt fires reliably
         tryTeleportToStoryPad(false)
-        task.wait(0.22)
+        task.wait(0.18)
     end
+
+    -- Check if map UI is already open with rows populated
     local mapList, mapEntry = findStoryMapRow(mapKey)
-    if not (mapList and mapEntry) and not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
-        tryTeleportToStoryPad(true)
-        task.wait(0.42)
-        mapList, mapEntry = findStoryMapRow(mapKey)
-    end
-    if not (mapList and mapEntry) and not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
+
+    -- If not found, fire the ProximityPrompt to open / refresh the MapSelect UI
+    if not (mapList and mapEntry) then
         if not (getgenv and getgenv().BonusChestStoryPadFirePrompt == false) then
             if tryStoryPadTeleportAndFirePromptOpenMapUi() then
-                local uiWait = 1.5
+                -- Wait for rows to be dynamically added by the game
+                local uiWait = 2.2
                 if getgenv and type(getgenv().BonusChestStoryPadPromptUiWait) == "number" then
                     uiWait = getgenv().BonusChestStoryPadPromptUiWait
                 end
-                task.wait(math.clamp(uiWait, 0.2, 4))
+                task.wait(math.clamp(uiWait, 0.5, 5))
                 mapList, mapEntry = findStoryMapRow(mapKey)
             end
         end
+    end
+
+    -- Second TP attempt with forced snap in case first didn't register
+    if not (mapList and mapEntry) and not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
+        tryTeleportToStoryPad(true)
+        task.wait(0.55)
+        mapList, mapEntry = findStoryMapRow(mapKey)
     end
     if mapList and mapEntry then
         local sg = screenGuiAncestor(mapList)
@@ -3614,13 +3695,28 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
             end
         end
 
+        -- Search preferred ScreenGui first, then all PlayerGui ScreenGuis
         local startBtn = findStartButtonInPlayerGui(sg)
+        if not startBtn then
+            -- Broader search: any visible Start/Play button in PlayerGui
+            local pg3 = LP:FindFirstChild("PlayerGui")
+            if pg3 then
+                for _, sgAny in ipairs(pg3:GetDescendants()) do
+                    if sgAny:IsA("ScreenGui") and sgAny.Enabled then
+                        local b = findStartButtonInScreenGui(sgAny)
+                        if b then startBtn = b; break end
+                    end
+                end
+            end
+        end
         if not startBtn then
             return false, "no_start"
         end
         guiActivate(startBtn)
-        task.wait(0.1)
+        task.wait(0.12)
         guiActivate(startBtn)
+        task.wait(0.12)
+        guiActivate(startBtn)  -- triple-click for reliability
         return true, nil
     end
 
@@ -4583,6 +4679,31 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "TP to pad → map/stag
                     local t = os.clock()
                     if t - G.lastStoryPadTp > 2.5 then
                         G.lastStoryPadTp = t
+                        -- Debug: print what the MapList actually contains right now
+                        pcall(function()
+                            local pg2 = LP:FindFirstChild("PlayerGui")
+                            if not pg2 then return end
+                            for _, ml in ipairs(pg2:GetDescendants()) do
+                                if ml.Name == "MapList" and ml:IsA("GuiObject") then
+                                    local holder2 = ml:FindFirstChild("ListContainer") and ml.ListContainer:FindFirstChild("List") or ml:FindFirstChild("List")
+                                    if holder2 then
+                                        local rowNames = {}
+                                        for _, ch in ipairs(holder2:GetChildren()) do
+                                            if not ch.Name:match("^UI") then
+                                                local txt = ""
+                                                for _, d in ipairs(ch:GetDescendants()) do
+                                                    if (d:IsA("TextLabel") or d:IsA("TextButton")) and #(d.Text or "") > 0 then
+                                                        txt = d.Text; break
+                                                    end
+                                                end
+                                                rowNames[#rowNames+1] = ch.Name .. (txt ~= "" and ("=["..txt.."]") or "")
+                                            end
+                                        end
+                                        print("[SH] MapList rows:", table.concat(rowNames, ", "))
+                                    end
+                                end
+                            end
+                        end)
                         if not (getgenv and getgenv().BonusChestStoryPadFirePrompt == false) and tryStoryPadTeleportAndFirePromptOpenMapUi() then
                             Win:Status("Story: Story pad — triggered prompt (wait for map UI)")
                         elseif tryTeleportToStoryPad() then
@@ -4598,7 +4719,7 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "TP to pad → map/stag
                         Win:Status("Story: Start button not found — update game UI or use executor with getconnections")
                     end
                 end
-                task.wait(1.2)
+                task.wait(0.6)
             end
         end)
     else
