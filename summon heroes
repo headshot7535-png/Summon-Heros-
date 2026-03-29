@@ -144,165 +144,103 @@ local function loadConfig()
     if not ok2 or type(data) ~= "table" then
         return defaults
     end
-    if type(data.autoCollect) == "boolean" then
-        defaults.autoCollect = data.autoCollect
-    end
-    if type(data.queueOnTeleport) == "boolean" then
-        defaults.queueOnTeleport = data.queueOnTeleport
-    end
-    if type(data.autoRevive) == "boolean" then
-        defaults.autoRevive = data.autoRevive
-    end
-    if type(data.autoPlayNextMap) == "boolean" then
-        defaults.autoPlayNextMap = data.autoPlayNextMap
-    end
-    if type(data.autoRetryStage) == "boolean" then
-        defaults.autoRetryStage = data.autoRetryStage
-    end
-    if type(data.autoReadyUp) == "boolean" then
-        defaults.autoReadyUp = data.autoReadyUp
-    end
-    if type(data.autoRedeemCodes) == "boolean" then
-        defaults.autoRedeemCodes = data.autoRedeemCodes
-    end
-    if type(data.storyMapKey) == "string" and #data.storyMapKey > 0 then
-        defaults.storyMapKey = data.storyMapKey
-    end
-    if type(data.storyStage) == "number" and data.storyStage >= 1 then
-        defaults.storyStage = math.floor(data.storyStage)
-    end
-    if type(data.autoStartStory) == "boolean" then
-        defaults.autoStartStory = data.autoStartStory
-    end
-    if type(data.dungeonRaidKey) == "string" and #data.dungeonRaidKey > 0 then
-        defaults.dungeonRaidKey = data.dungeonRaidKey
-    end
-    if type(data.dungeonStage) == "number" and data.dungeonStage >= 1 then
-        defaults.dungeonStage = math.floor(data.dungeonStage)
-    end
-    if type(data.autoStartDungeon) == "boolean" then
-        defaults.autoStartDungeon = data.autoStartDungeon
-    end
-    if type(data.rotatingShopKey) == "string" and #data.rotatingShopKey > 0 then
-        defaults.rotatingShopKey = data.rotatingShopKey
-    end
-    if type(data.rotatingShopFilter) == "string" then
-        defaults.rotatingShopFilter = data.rotatingShopFilter
-    end
-    if type(data.autoBuyRotatingShop) == "boolean" then
-        defaults.autoBuyRotatingShop = data.autoBuyRotatingShop
-    end
-    if type(data.autoFuseUnits) == "boolean" then
-        defaults.autoFuseUnits = data.autoFuseUnits
-    end
-    if type(data.fuseMinStars) == "number" then
-        defaults.fuseMinStars = math.clamp(math.floor(data.fuseMinStars), 3, 9)
-    end
-    if type(data.fuseMaxStars) == "number" then
-        defaults.fuseMaxStars = math.clamp(math.floor(data.fuseMaxStars), 3, 9)
-    end
-    if type(data.fuseMaxFodderLevel) == "number" and data.fuseMaxFodderLevel >= 0 then
-        defaults.fuseMaxFodderLevel = math.floor(data.fuseMaxFodderLevel)
-    end
-    if type(data.fuseMainUnitId) == "string" then
-        defaults.fuseMainUnitId = data.fuseMainUnitId
-    end
-    if type(data.fuseSacrificeIds) == "string" then
-        defaults.fuseSacrificeIds = data.fuseSacrificeIds
-    end
-    if type(data.autoSummon) == "boolean" then
-        defaults.autoSummon = data.autoSummon
-    end
-    if type(data.summonPack) == "string" and #data.summonPack > 0 then
-        defaults.summonPack = data.summonPack
-    end
-    if type(data.summonAmount) == "number" and data.summonAmount >= 1 then
-        defaults.summonAmount = math.clamp(math.floor(data.summonAmount), 1, 10)
-    end
-    if type(data.summonCurrency) == "string" and #data.summonCurrency > 0 then
-        defaults.summonCurrency = data.summonCurrency
-    end
-    if type(data.summonSellDelaySec) == "number" and data.summonSellDelaySec >= 0 then
-        defaults.summonSellDelaySec = math.floor(data.summonSellDelaySec)
-    end
-    for _, k in ipairs({
-        "autoSellRare",
-        "autoSellEpic",
-        "autoSellLegendary",
-        "autoSellMythic",
-    }) do
-        if type(data[k]) == "boolean" then
-            defaults[k] = data[k]
+
+    -- Table-driven merge: { key, "bool"|"str"|"strNonEmpty"|"int"|"intMin:n"|"intClamp:lo:hi"|"float"|"floatMin:n"|"enum:a:b:..." }
+    local FIELDS = {
+        { "autoCollect",            "bool" },
+        { "queueOnTeleport",        "bool" },
+        { "autoRevive",             "bool" },
+        { "autoPlayNextMap",        "bool" },
+        { "autoRetryStage",         "bool" },
+        { "autoReadyUp",            "bool" },
+        { "autoRedeemCodes",        "bool" },
+        { "autoStartStory",         "bool" },
+        { "storyMapKey",            "strNonEmpty" },
+        { "storyStage",             "intMin:1" },
+        { "autoStartDungeon",       "bool" },
+        { "dungeonRaidKey",         "strNonEmpty" },
+        { "dungeonStage",           "intMin:1" },
+        { "autoBuyRotatingShop",    "bool" },
+        { "rotatingShopKey",        "strNonEmpty" },
+        { "rotatingShopFilter",     "str" },
+        { "autoFuseUnits",          "bool" },
+        { "fuseMinStars",           "intClamp:3:9" },
+        { "fuseMaxStars",           "intClamp:3:9" },
+        { "fuseMaxFodderLevel",     "intMin:0" },
+        { "fuseMainUnitId",         "str" },
+        { "fuseSacrificeIds",       "str" },
+        { "autoSummon",             "bool" },
+        { "summonPack",             "strNonEmpty" },
+        { "summonAmount",           "intClamp:1:10" },
+        { "summonCurrency",         "strNonEmpty" },
+        { "summonSellDelaySec",     "intMin:0" },
+        { "autoSellRare",           "bool" },
+        { "autoSellEpic",           "bool" },
+        { "autoSellLegendary",      "bool" },
+        { "autoSellMythic",         "bool" },
+        { "autoStatReroll",         "bool" },
+        { "statRerollUnitName",     "str" },
+        { "statRerollLockAttack",   "bool" },
+        { "statRerollLockHealth",   "bool" },
+        { "statRerollLockCooldown", "bool" },
+        { "statRerollLockSpeed",    "bool" },
+        { "statRerollMode",         "enum:always:better" },
+        { "statRerollMaxRolls",     "intMin:0" },
+        { "statRerollDelaySec",     "floatMin:0" },
+        { "autoTraitReroll",        "bool" },
+        { "traitRerollUnitName",    "str" },
+        { "traitRerollGoals",       "str" },
+        { "traitRerollMode",        "enum:until_goal:always_apply" },
+        { "traitRerollMaxRolls",    "intMin:0" },
+        { "traitRerollDelaySec",    "floatMin:0" },
+        { "traitRerollSkipAnim",    "bool" },
+        { "autoClaimAchievements",  "bool" },
+        { "autoClaimDaily",         "bool" },
+        { "claimQuestsIntervalSec", "intMin:5" },
+        { "playerWalkSpeed",        "intClamp:0:300" },
+        { "playerInfiniteJump",     "bool" },
+        { "playerAntiAfk",          "bool" },
+        { "playerNoclip",           "bool" },
+        { "playerGodMode",          "bool" },
+    }
+
+    for _, fd in ipairs(FIELDS) do
+        local key, rule = fd[1], fd[2]
+        local v = data[key]
+        if rule == "bool" then
+            if type(v) == "boolean" then defaults[key] = v end
+        elseif rule == "str" then
+            if type(v) == "string" then defaults[key] = v end
+        elseif rule == "strNonEmpty" then
+            if type(v) == "string" and #v > 0 then defaults[key] = v end
+        elseif rule == "floatMin:0" then
+            if type(v) == "number" and v >= 0 then defaults[key] = v end
+        else
+            -- numeric rules: intMin:n | intClamp:lo:hi | enum:a:b:...
+            local ruleType = rule:match("^([^:]+)")
+            if ruleType == "intMin" then
+                local minVal = tonumber(rule:match(":(.+)$")) or 0
+                if type(v) == "number" and v >= minVal then
+                    defaults[key] = math.floor(v)
+                end
+            elseif ruleType == "intClamp" then
+                local lo, hi = rule:match(":(%d+):(%d+)")
+                lo, hi = tonumber(lo), tonumber(hi)
+                if type(v) == "number" and lo and hi then
+                    defaults[key] = math.clamp(math.floor(v), lo, hi)
+                end
+            elseif ruleType == "enum" then
+                local allowed = {}
+                for part in rule:gmatch(":([^:]+)") do
+                    allowed[part] = true
+                end
+                if type(v) == "string" and allowed[v] then
+                    defaults[key] = v
+                end
+            end
         end
     end
-    if type(data.autoStatReroll) == "boolean" then
-        defaults.autoStatReroll = data.autoStatReroll
-    end
-    if type(data.statRerollUnitName) == "string" then
-        defaults.statRerollUnitName = data.statRerollUnitName
-    end
-    for _, lk in ipairs({
-        "statRerollLockAttack",
-        "statRerollLockHealth",
-        "statRerollLockCooldown",
-        "statRerollLockSpeed",
-    }) do
-        if type(data[lk]) == "boolean" then
-            defaults[lk] = data[lk]
-        end
-    end
-    if type(data.statRerollMode) == "string" and (data.statRerollMode == "always" or data.statRerollMode == "better") then
-        defaults.statRerollMode = data.statRerollMode
-    end
-    if type(data.statRerollMaxRolls) == "number" and data.statRerollMaxRolls >= 0 then
-        defaults.statRerollMaxRolls = math.floor(data.statRerollMaxRolls)
-    end
-    if type(data.statRerollDelaySec) == "number" and data.statRerollDelaySec >= 0 then
-        defaults.statRerollDelaySec = data.statRerollDelaySec
-    end
-    if type(data.autoTraitReroll) == "boolean" then
-        defaults.autoTraitReroll = data.autoTraitReroll
-    end
-    if type(data.traitRerollUnitName) == "string" then
-        defaults.traitRerollUnitName = data.traitRerollUnitName
-    end
-    if type(data.traitRerollGoals) == "string" then
-        defaults.traitRerollGoals = data.traitRerollGoals
-    end
-    if type(data.traitRerollMode) == "string" and (data.traitRerollMode == "until_goal" or data.traitRerollMode == "always_apply") then
-        defaults.traitRerollMode = data.traitRerollMode
-    end
-    if type(data.traitRerollMaxRolls) == "number" and data.traitRerollMaxRolls >= 0 then
-        defaults.traitRerollMaxRolls = math.floor(data.traitRerollMaxRolls)
-    end
-    if type(data.traitRerollDelaySec) == "number" and data.traitRerollDelaySec >= 0 then
-        defaults.traitRerollDelaySec = data.traitRerollDelaySec
-    end
-    if type(data.traitRerollSkipAnim) == "boolean" then
-        defaults.traitRerollSkipAnim = data.traitRerollSkipAnim
-    end
-    if type(data.autoClaimAchievements) == "boolean" then
-        defaults.autoClaimAchievements = data.autoClaimAchievements
-    end
-    if type(data.autoClaimDaily) == "boolean" then
-        defaults.autoClaimDaily = data.autoClaimDaily
-    end
-    if type(data.claimQuestsIntervalSec) == "number" and data.claimQuestsIntervalSec >= 5 then
-        defaults.claimQuestsIntervalSec = math.floor(data.claimQuestsIntervalSec)
-    end
-    if type(data.playerWalkSpeed) == "number" then
-        defaults.playerWalkSpeed = math.clamp(math.floor(data.playerWalkSpeed), 0, 300)
-    end
-    for _, pk in ipairs({
-        "playerInfiniteJump",
-        "playerAntiAfk",
-        "playerNoclip",
-        "playerGodMode",
-    }) do
-        if type(data[pk]) == "boolean" then
-            defaults[pk] = data[pk]
-        end
-    end
+
     return defaults
 end
 
@@ -2528,27 +2466,55 @@ local function fireMapReady()
     return true
 end
 
---- WaveData keys (MapList frame names under List — must match game ReplicatedStorage data).
-local STORY_MAP_OPTIONS = {
-    { text = "Rookie Island", value = "RookieIsland" },
-    { text = "Volcano Fortress", value = "VolcanoFortress" },
-    { text = "Frozen Glacier", value = "FrozenGlacier" },
-    { text = "Calamity Canyon", value = "CalamityCanyon" },
-    { text = "Sakura Village", value = "SakuraVillage" },
-    { text = "Evercrest Academy", value = "EvercrestAcademy" },
-    { text = "Dual Wielder", value = "DualWielder" },
-}
-
-local function storyMapOptionIndexForKey(key)
-    if type(key) ~= "string" then
-        return 2
-    end
-    for i, row in ipairs(STORY_MAP_OPTIONS) do
-        if row.value == key then
-            return i
+--- Build map list dynamically from ReplicatedStorage.Systems.Waves.WaveData.
+--- Falls back to hardcoded list if WaveData not accessible.
+local STORY_MAP_OPTIONS = (function()
+    local opts = {}
+    -- Try to read live WaveData from the game
+    local ok, waveData = pcall(function()
+        return require(game.ReplicatedStorage.Systems.Waves.WaveData)
+    end)
+    if ok and type(waveData) == "table" then
+        -- Collect non-hidden, non-raid story maps ordered by their Order field
+        local maps = {}
+        for key, data in pairs(waveData) do
+            if type(data) == "table" and data.Title and not data.Hidden and not data.IsRaid then
+                maps[#maps + 1] = {
+                    text  = data.Title,
+                    value = key,
+                    order = data.Order or 999,
+                }
+            end
+        end
+        table.sort(maps, function(a, b) return a.order < b.order end)
+        if #maps > 0 then
+            return maps
         end
     end
-    return 2
+    -- Fallback: hardcoded list (updated to match known game WaveData keys)
+    return {
+        { text = "Rookie Island",     value = "RookieIsland"     },
+        { text = "Volcano Fortress",  value = "VolcanoFortress"  },
+        { text = "Frozen Glacier",    value = "FrozenGlacier"    },
+        { text = "Calamity Canyon",   value = "CalamityCanyon"   },
+        { text = "Sakura Village",    value = "SakuraVillage"    },
+        { text = "Evercrest Academy", value = "EvercrestAcademy" },
+        { text = "Dual Wielder",      value = "DualWielder"      },
+        { text = "Sunset City",       value = "SunsetCity"       },
+    }
+end)()
+
+print("[SH] Story maps loaded: " .. #STORY_MAP_OPTIONS)
+for _, m in ipairs(STORY_MAP_OPTIONS) do
+    print("  " .. m.value .. " = " .. m.text)
+end
+
+local function storyMapOptionIndexForKey(key)
+    if type(key) ~= "string" then return 1 end
+    for i, row in ipairs(STORY_MAP_OPTIONS) do
+        if row.value == key then return i end
+    end
+    return 1
 end
 
 --- RaidSelect dungeon stages (WaveData.Dungeon.Stages order).
@@ -3088,45 +3054,88 @@ local function guiActivate(inst)
     end
 end
 
---- Systems.Queue.LaunchQueue — FireServer(queueModel) only (Summon Heroes / party launcher).
-local function resolveLaunchQueueRemote()
-    local systems = getSystemsFolder()
-    if not systems then
-        return nil
+--- Deep-search PlayerGui + RS for a named RemoteEvent/Function.
+--- Summon Heroes stores remotes as children of the CLIENT LocalScript,
+--- NOT in RS.Systems.Queue. We search broadly to handle both layouts.
+local _remoteCache = {}
+local function findRemoteAnywhere(name)
+    if _remoteCache[name] and _remoteCache[name].Parent then
+        return _remoteCache[name]
     end
-    local qf = systems:FindFirstChild("Queue")
-    if not qf then
-        return nil
+    -- 1. RS.Systems.Queue (canonical script path)
+    local sys = getSystemsFolder()
+    if sys then
+        local qf = sys:FindFirstChild("Queue")
+        local r = qf and qf:FindFirstChild(name)
+        if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
+            _remoteCache[name] = r; return r
+        end
+        -- Also check directly in Systems
+        r = sys:FindFirstChild(name, true)
+        if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
+            _remoteCache[name] = r; return r
+        end
     end
-    local ev = qf:FindFirstChild("LaunchQueue")
-    if ev and (ev:IsA("RemoteEvent") or ev:IsA("UnreliableRemoteEvent")) then
-        return ev
+    -- 2. CLIENT LocalScript children (Players.X.PlayerGui.CLIENT.LocalScript.X)
+    local pg = LP:FindFirstChild("PlayerGui")
+    if pg then
+        local client = pg:FindFirstChild("CLIENT")
+        if client then
+            local ls = client:FindFirstChildWhichIsA("LocalScript")
+            if ls then
+                local r = ls:FindFirstChild(name)
+                if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
+                    _remoteCache[name] = r; return r
+                end
+                -- Also check Remotes subfolder if present
+                local remFolder = ls:FindFirstChild("Remotes")
+                if remFolder then
+                    r = remFolder:FindFirstChild(name)
+                    if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
+                        _remoteCache[name] = r; return r
+                    end
+                end
+            end
+            -- Deep search all LocalScripts under CLIENT
+            for _, ls2 in ipairs(client:GetDescendants()) do
+                if ls2:IsA("LocalScript") or ls2:IsA("Script") then
+                    local r = ls2:FindFirstChild(name)
+                    if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
+                        _remoteCache[name] = r; return r
+                    end
+                end
+            end
+        end
+        -- Broader PlayerGui descendant search
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d.Name == name and (d:IsA("RemoteEvent") or d:IsA("UnreliableRemoteEvent") or d:IsA("RemoteFunction")) then
+                _remoteCache[name] = d; return d
+            end
+        end
+    end
+    -- 3. RS deep search
+    for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+        if d.Name == name and (d:IsA("RemoteEvent") or d:IsA("UnreliableRemoteEvent") or d:IsA("RemoteFunction")) then
+            _remoteCache[name] = d; return d
+        end
     end
     return nil
 end
 
---- Systems.Queue.SetQueue — FireServer(queueSlotInstance, mapKey, stageNum) when game uses map/stage args.
+--- LaunchQueue:FireServer(queueModel)
+local function resolveLaunchQueueRemote()
+    return findRemoteAnywhere("LaunchQueue")
+end
+
+--- SetQueue:FireServer(queueSlot, mapKey, stageNum)
 local function resolveSetQueueRemote()
-    local systems = getSystemsFolder()
-    if not systems then
-        return nil
-    end
-    local qf = systems:FindFirstChild("Queue")
-    if not qf then
-        return nil
-    end
-    local ev = qf:FindFirstChild("SetQueue")
-    if
-        ev
-        and (
-            ev:IsA("RemoteEvent")
-            or ev:IsA("UnreliableRemoteEvent")
-            or ev:IsA("RemoteFunction")
-        )
-    then
-        return ev
-    end
-    return nil
+    return findRemoteAnywhere("SetQueue")
+end
+
+--- RequestEnterQueue:InvokeServer(queueSlot) → (success, needMapSelect, errorMsg)
+--- Server validates queue membership; must be called before SetQueue/LaunchQueue will act.
+local function resolveRequestEnterQueueRemote()
+    return findRemoteAnywhere("RequestEnterQueue")
 end
 
 local function findLobbyMapWithQueues()
@@ -3315,24 +3324,34 @@ local function getDungeonQueuePadModelByLobbyColor()
 end
 
 --- TP to Visual.Main with offset (0, 6, 2) — lobby queue pad.
-local function teleportHrpToQueuePadMainWithOffset(padModel)
-    if not padModel then
-        return false
-    end
+--- CFrame-teleport HRP onto Visual.Main then Door so the server's magnitude check passes.
+--- firetouchinterest is client-only and does not replicate — skip it entirely.
+local function fireTouchOnQueueParts(padModel)
     local main = getQueueVisualMainPart(padModel)
-    if not main then
-        return false
+    local door = padModel and padModel:FindFirstChild("Door", true)
+    local hrp  = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    if main and main:IsA("BasePart") then
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.CFrame = main.CFrame * CFrame.new(0, 3.5, 0)
+        end)
+        task.wait(0.12)
     end
-    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then
-        return false
+    if door and door:IsA("BasePart") then
+        pcall(function()
+            hrp.CFrame = CFrame.new(door.Position + Vector3.new(0, door.Size.Y * 0.5 + 1.5, 0))
+        end)
+        task.wait(0.08)
+        return true
     end
-    pcall(function()
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        hrp.CFrame = main.CFrame * CFrame.new(0, 6, 2)
-    end)
-    task.wait(0.7)
-    return true
+    return main ~= nil
+end
+
+--- Alias kept so existing call-sites (direct pad branches) don't need touching.
+local function teleportHrpToQueuePadMainWithOffset(padModel)
+    if not padModel then return false end
+    return fireTouchOnQueueParts(padModel)
 end
 
 --- SetQueue(slot, mapKey, stage) then LaunchQueue(slot); uses resolve* remotes (same as full UI path).
@@ -3344,6 +3363,46 @@ local function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
     if getgenv and type(getgenv().BonusChestSetQueueLaunchGap) == "number" then
         gap = math.clamp(getgenv().BonusChestSetQueueLaunchGap, 0.05, 3)
     end
+
+    -- Server does a server-side magnitude check against padModel.Door before
+    -- honouring RequestEnterQueue. We briefly teleport to the Door, invoke,
+    -- then return to the original position. Total time: ~0.6s, invisible in
+    -- normal play and safe to do before any loading screen appears.
+    local reqEnterEv = resolveRequestEnterQueueRemote()
+    if reqEnterEv then
+        local char    = LP.Character
+        local root    = char and char:FindFirstChild("HumanoidRootPart")
+        local door    = padModel:FindFirstChild("Door", true)
+
+        local originalCF = root and root.CFrame
+        if root and door then
+            -- Teleport onto the door (4 studs above centre to avoid clipping)
+            root.CFrame = door.CFrame + Vector3.new(0, 4, 0)
+            task.wait(0.15)   -- let server register the new position
+        else
+            if not root then print("[SH] RequestEnterQueue: no HumanoidRootPart, skipping teleport") end
+            if not door then print("[SH] RequestEnterQueue: no Door child found on padModel") end
+        end
+
+        local ok, success, needMapSelect, errMsg = pcall(function()
+            return reqEnterEv:InvokeServer(padModel)
+        end)
+
+        -- Return to original position immediately, before any wait
+        if root and originalCF then
+            root.CFrame = originalCF
+        end
+
+        if ok then
+            print("[SH] RequestEnterQueue ->", success, needMapSelect, errMsg)
+        else
+            print("[SH] RequestEnterQueue pcall error:", success)
+        end
+        task.wait(0.3)
+    else
+        print("[SH] RequestEnterQueue remote not found - proceeding anyway")
+    end
+
     local setEv = resolveSetQueueRemote()
     if setEv then
         if setEv:IsA("RemoteFunction") then
@@ -3430,16 +3489,12 @@ local function resolveDungeonQueueLobbySlotInstance()
 end
 
 --- Stand on Visual.Main (blue/red Neon marker) then nudge — some games use Main.Touched instead of Door.
+--- CFrame-snap HRP onto Visual.Main. firetouchinterest is client-only — not used.
 local function tryTeleportToQueueVisualMain(slotModel)
     local main = getQueueVisualMainPart(slotModel)
-    if not main then
-        return false
-    end
-    local char = LP.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then
-        return false
-    end
+    if not main then return false end
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
     local pos = main.Position
     local lift = main.Size.Y * 0.5 + 2.8
     pcall(function()
@@ -3447,37 +3502,23 @@ local function tryTeleportToQueueVisualMain(slotModel)
         hrp.CFrame = CFrame.new(pos + Vector3.new(0, lift, 0))
     end)
     task.wait(0.06)
-    pcall(function()
-        hrp.CFrame = CFrame.new(pos + Vector3.new(0, math.max(1.4, lift * 0.5), 0))
-    end)
     return true
 end
 
---- Stand on/near queue Door so .Touched hooks fire (CFrame alone may not trigger without overlap).
+--- CFrame-snap HRP onto Door. firetouchinterest is client-only — not used.
 local function tryTeleportToQueueSlotDoor(slotModel)
-    if not slotModel or not slotModel.Parent then
-        return false
-    end
+    if not slotModel or not slotModel.Parent then return false end
     local door = slotModel:FindFirstChild("Door", true)
-    if not door or not door:IsA("BasePart") then
-        return false
-    end
-    local char = LP.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then
-        return false
-    end
+    if not door or not door:IsA("BasePart") then return false end
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
     local pos = door.Position
     local halfY = door.Size.Y * 0.5 + 2.5
-    local target = pos + Vector3.new(0, halfY, 0)
     pcall(function()
         hrp.AssemblyLinearVelocity = Vector3.zero
-        hrp.CFrame = CFrame.new(target)
+        hrp.CFrame = CFrame.new(pos + Vector3.new(0, halfY, 0))
     end)
     task.wait(0.06)
-    pcall(function()
-        hrp.CFrame = CFrame.new(pos + Vector3.new(0, math.max(1.5, halfY * 0.45), 0))
-    end)
     return true
 end
 
@@ -3486,11 +3527,10 @@ local QUEUE_TELEPORT_SKIP_DIST = 72
 --- After first queue snap, do not TP again until respawn (unless BonusChestStoryQueueReteleport / dungeon equivalent).
 local storyQueueLobbyTeleportUsed = false
 local dungeonQueueLobbyTeleportUsed = false
-pcall(function()
-    LP.CharacterAdded:Connect(function()
-        storyQueueLobbyTeleportUsed = false
-        dungeonQueueLobbyTeleportUsed = false
-    end)
+LP.CharacterAdded:Connect(function()
+    storyQueueLobbyTeleportUsed = false
+    dungeonQueueLobbyTeleportUsed = false
+    _remoteCache = {}  -- clear cache so remotes are re-found after respawn/reload
 end)
 
 local function hrpWithinStudsOfQueueSlot(slotModel, maxDist)
@@ -3546,13 +3586,18 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
     end
     stageNum = math.floor(stageNum)
 
-    if getgenv and getgenv().BonusChestStoryDirectPadSetQueueLaunch == true then
-        local pad = getStoryQueuePadModelByLobbyColor() or resolveStoryQueueLobbySlotInstance()
+    -- Direct pad path: TP to blue queue Visual.Main → SetQueue + LaunchQueue (no map UI needed).
+    -- Used when: BonusChestStoryDirectPadSetQueueLaunch = true, OR pad model found by hue
+    -- (which means we know where the queue is and the ProximityPrompt approach isn't needed).
+    local _directPadForced = getgenv and getgenv().BonusChestStoryDirectPadSetQueueLaunch == true
+    local _directPadModel  = getStoryQueuePadModelByLobbyColor()
+    if _directPadForced or _directPadModel then
+        local pad = _directPadModel or resolveStoryQueueLobbySlotInstance()
         if not pad then
             return false, "no_pad"
         end
         if teleportHrpToQueuePadMainWithOffset(pad) then
-            task.wait(0.8)
+            task.wait(0.5)
             if trySetQueueThenLaunchQueueForPadModel(pad, mapKey, stageNum) then
                 return true, nil
             end
@@ -3661,6 +3706,23 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
                     task.wait(0.28)
                     storyQueueLobbyTeleportUsed = true
                 end
+            end
+        end
+
+        -- RequestEnterQueue must succeed before LaunchQueue/SetQueue will be honoured.
+        -- We are already at the Door from the teleport above, so the magnitude check passes.
+        if slotInst then
+            local reqEv = resolveRequestEnterQueueRemote()
+            if reqEv then
+                local okR, suc, _, eMsg = pcall(function()
+                    return reqEv:InvokeServer(slotInst)
+                end)
+                if okR then
+                    print("[SH] Story RequestEnterQueue ->", suc, eMsg)
+                else
+                    print("[SH] Story RequestEnterQueue pcall error:", suc)
+                end
+                task.wait(0.3)
             end
         end
 
@@ -3786,6 +3848,24 @@ local function tryAutoStartDungeonOnce(raidKey, stageNum)
     if not mapList or not row then
         return false, "no_ui"
     end
+
+    -- RequestEnterQueue must succeed before LaunchQueue/SetQueue will be honoured.
+    -- Character is already at the Door from the teleport above.
+    if dSlot then
+        local reqEv = resolveRequestEnterQueueRemote()
+        if reqEv then
+            local okR, suc, _, eMsg = pcall(function()
+                return reqEv:InvokeServer(dSlot)
+            end)
+            if okR then
+                print("[SH] Dungeon RequestEnterQueue ->", suc, eMsg)
+            else
+                print("[SH] Dungeon RequestEnterQueue pcall error:", suc)
+            end
+            task.wait(0.3)
+        end
+    end
+
     local sg = screenGuiAncestor(mapList)
     local rowLock = row:FindFirstChild("Container", true)
     rowLock = rowLock and rowLock:FindFirstChild("LockState")
@@ -4619,7 +4699,7 @@ TBattle:Label("Blue = Story · Red = Dungeon · SetQueue + LaunchQueue (Systems.
 
 TBattle:Section("Story / map select")
 TBattle:Label("Auto TP to Story pad → select map → stage → queue → Start. Works even if UI is closed (pad ProximityPrompt + optional fireproximityprompt / E).")
-TBattle:Label("Map dropdown = MapList row Name (e.g. VolcanoFortress). If UI missing, pad TP + prompt runs, then retries.")
+TBattle:Label("Map list loaded live from WaveData — shows all story maps in the game. Stage = which stage of that map (1, 2, 3…).")
 
 storyMapDropdownRef = TBattle:Dropdown(
     "Story map",
