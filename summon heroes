@@ -287,10 +287,8 @@ end
 syncBonusChestNoQueueFromSaved()
 
 local NEXUSLIB_URLS = {
-    -- v1.4: Discord-style chat, ExploitTab
-    "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib1_4.lua",
-    "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib1_4",
-    -- v1.3 fallback
+    -- Confirmed live URL (v1.4 with ChatTab + ExploitTab)
+    "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/refs/heads/main/Nexuslib",
     "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib",
     "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib.lua",
 }
