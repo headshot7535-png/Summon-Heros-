@@ -11,6 +11,7 @@
   Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
 
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
+  Player tab (NexusLib): walk speed, infinite jump, anti-AFK (+ optional noclip / god / respawn).
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -458,13 +459,16 @@ local function collectAllChests(progressCb)
 end
 
 -- ── NexusLib UI ───────────────────────────────────────────────
-local Win = NexusLib:Window({ title = "Bonus Chests", width = 360, height = 620 })
+local Win = NexusLib:Window({ title = "Bonus Chests", width = 360, height = 680 })
 
 local T = Win:Tab("📦", "Chests")
 T:Section("Map chests")
 T:Label("BonusChestPart · TP + fireproximityprompt; E-wait only if prompt stays enabled.")
 
 local hint = T:Label("Ready.")
+
+-- Movement: walk speed slider, infinite jump, anti-AFK (VirtualUser every 55s). Also noclip / god / respawn in NexusLib.
+Win:PlayerTab()
 
 local function setHint(text)
     hint.Set(text)
