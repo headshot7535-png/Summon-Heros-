@@ -1,12 +1,12 @@
 --[[
   Summon Heroes — FIXED SAVE/LOAD + GUI CLEANUP + full automation (2026). One NexusLib window (Win:Window{ title, width, height }).
-  JSON: BonusChests_config.json (or getgenv().BonusChestConfigPath). persistAll uses persistToggleBool for toggles — Lua bug fixed: `ref and ref.Get() or saved` was turning OFF into previous saved ON. After write, `saved` is merged from disk for same-session consistency.
+  JSON: BonusChests_config.json — loadConfig() at script start and again right before NexusLib:Window (re-exec = fresh read from disk). persistAll (debounced ~0.6s) uses persistToggleBool; persistAll(true) flushes immediately (e.g. BindToClose). After save, `saved` is merged from file for same-session reads.
   Re-execute: cleanupOldNexusLibGuiBeforeWindow() removes NexusLib_* ScreenGuis only (avoid blanket PlayerGui deletes by "Window"/"Main"). loadConfig() each run; task.defer restores toggles from saved (true/false). Do not destroy CoreGui by name.
   Loop cancellation: each auto feature bumps a generation counter so the previous task.spawn loop exits (no stuck/overlapping loops).
     • G.loop — bonus chests auto   • G.revive — auto revive   • G.ready — map ready
     • G.story / G.dungeon — story & dungeon auto-start   • stageVoteLoopId — round-end Next / Retry vote
     • G.fuse / G.summon / G.shop / G.statReroll / G.traitReroll / G.questClaim — units, shop, rerolls, claims
-  Toggles call persistAll(); saved toggles are restored via Toggle:Set(savedValue) in task.defer (do not paste a second copy of this script).
+  Toggles call persistAll() (debounced write); saved toggles are restored via Toggle:Set(savedValue) in task.defer (do not paste a second copy of this script).
 
   Bonus chest auto: optional lobby-only when workspace:GetAttribute("RoundStarted") == true (disable with getgenv().BonusChestChestsLobbyOnly = false).
   isInLobby() == (RoundStarted ~= true); used for chest gating and available for other checks.
@@ -320,6 +320,18 @@ end
 
 local saved = loadConfig()
 
+--- Matches getgenv queue opt-out to `saved.queueOnTeleport` (call after every loadConfig).
+local function syncBonusChestNoQueueFromSaved()
+    if not getgenv then
+        return
+    end
+    if saved.queueOnTeleport then
+        getgenv().BonusChestNoQueue = nil
+    else
+        getgenv().BonusChestNoQueue = true
+    end
+end
+
 --- NexusLib Toggle:Get() returns boolean false when OFF. In Lua, `ref and ref.Get() or saved.x` wrongly replaces false with saved.x — OFF never persists. Use this instead.
 local function persistToggleBool(ref, defaultWhenNoRef)
     if ref and type(ref.Get) == "function" then
@@ -331,14 +343,7 @@ local function persistToggleBool(ref, defaultWhenNoRef)
     return false
 end
 
--- Sync teleport opt-out with saved preference before queue_on_teleport runs.
-if getgenv then
-    if saved.queueOnTeleport then
-        getgenv().BonusChestNoQueue = nil
-    else
-        getgenv().BonusChestNoQueue = true
-    end
-end
+syncBonusChestNoQueueFromSaved()
 
 local NEXUSLIB_URLS = {
     "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib",
@@ -3927,6 +3932,9 @@ local Win
 local persistAll
 ;(function()
 cleanupOldNexusLibGuiBeforeWindow()
+-- Re-read JSON from disk immediately before building UI (each re-execution uses latest save file).
+saved = loadConfig()
+syncBonusChestNoQueueFromSaved()
 Win = NexusLib:Window({ title = "Summon Heroes", width = 400, height = 760 })
 
 local THome = Win:Tab("🏠", "Home")
@@ -4023,8 +4031,13 @@ local playerTabRefs = {}
 
 -- ==================== SAVE / LOAD ====================
 -- persistAll: snapshot UI → saveConfig → writefile; then merge JSON back into `saved`. Booleans use persistToggleBool(ref, fallback) — never `ref and ref.Get() or saved.x` for toggles.
+-- Debounced writes (AniPixels-style): rapid toggles/drags batch to one writefile; persistAll(true) for immediate flush.
 
-persistAll = function()
+local SETTINGS_SAVE_DEBOUNCE = 0.6
+local _persistQueued = false
+local _persistDirty = false
+
+local function persistAllWriteNow()
     local mapVal = saved.storyMapKey
     if storyMapDropdownRef then
         local _, v = storyMapDropdownRef.Get()
@@ -4284,6 +4297,31 @@ persistAll = function()
                 saved[k] = v
             end
         end
+    end)
+end
+
+local function _flushPersistWrite()
+    if not _persistDirty then
+        return
+    end
+    _persistDirty = false
+    persistAllWriteNow()
+end
+
+persistAll = function(immediate)
+    _persistDirty = true
+    if immediate == true then
+        _persistQueued = false
+        _flushPersistWrite()
+        return
+    end
+    if _persistQueued then
+        return
+    end
+    _persistQueued = true
+    task.delay(SETTINGS_SAVE_DEBOUNCE, function()
+        _persistQueued = false
+        _flushPersistWrite()
     end)
 end
 
@@ -5681,7 +5719,9 @@ end)
 
 pcall(function()
     game:BindToClose(function()
-        pcall(persistAll)
+        pcall(function()
+            persistAll(true)
+        end)
     end)
 end)
 
