@@ -179,16 +179,18 @@ local function guiObjectShownOnScreen(inst)
     return true
 end
 
+--- First FindFirstChild can hit a hidden template; prefer any *shown* instance with this name.
 local function playerGuiDescendantShown(name)
     local pg = LP:FindFirstChild("PlayerGui")
     if not pg then
         return false
     end
-    local inst = pg:FindFirstChild(name, true)
-    if not inst or not inst:IsA("GuiObject") then
-        return false
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d.Name == name and d:IsA("GuiObject") and guiObjectShownOnScreen(d) then
+            return true
+        end
     end
-    return guiObjectShownOnScreen(inst)
+    return false
 end
 
 local function getTryReviveRemote()
@@ -315,17 +317,40 @@ local function fireRoundEndVote(wantNext, wantRetry)
     if not ev then
         return
     end
-    local nextVis = wantNext and roundEndGuiButtonVisible("NextStageButton")
-    local restartVis = wantRetry and roundEndGuiButtonVisible("RestartButton")
-    if nextVis then
+    local nextShown = wantNext and roundEndGuiButtonVisible("NextStageButton")
+    local restartShown = wantRetry and roundEndGuiButtonVisible("RestartButton")
+    if nextShown then
         pcall(function()
             ev:FireServer("Next")
         end)
         return
     end
-    if restartVis then
+    if restartShown then
         pcall(function()
             ev:FireServer("Retry")
+        end)
+        return
+    end
+    -- Voting is open but our GUI probe missed (duplicate names, clipping). Solo rounds can clear the timer fast.
+    local timerActive = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
+    if not timerActive then
+        return
+    end
+    if wantRetry and not wantNext then
+        pcall(function()
+            ev:FireServer("Retry")
+        end)
+        return
+    end
+    if wantNext and not wantRetry then
+        pcall(function()
+            ev:FireServer("Next")
+        end)
+        return
+    end
+    if wantNext and wantRetry then
+        pcall(function()
+            ev:FireServer("Next")
         end)
     end
 end
@@ -585,7 +610,7 @@ readyToggleRef = T:Toggle("Auto ready up", "Checks ~1s · same as Ready in map H
 end)
 
 T:Section("Stage vote")
-T:Label("Vote only if that button is shown: Next vs Restart (each toggle gated separately).")
+T:Label("Votes while RoundEndTimer runs (~0.35s). GUI scan picks visible Next/Retry; else timer fallback.")
 
 nextStageToggleRef = T:Toggle("Auto play next map / stage", "Votes Next when the round-end screen offers it", saved.autoPlayNextMap, function()
     persistAll()
@@ -612,31 +637,17 @@ refreshStageWatcher = function()
         return
     end
     task.spawn(function()
-        local sawTimer = false
         while g == stageGen do
             if not anyStageAuto() then
                 break
             end
-            local timer = ReplicatedStorage:GetAttribute("RoundEndTimer")
-            if timer == nil then
-                sawTimer = false
-            elseif not sawTimer then
-                sawTimer = true
-                task.spawn(function()
-                    task.wait(1.15)
-                    if g ~= stageGen or not anyStageAuto() then
-                        return
-                    end
-                    if ReplicatedStorage:GetAttribute("RoundEndTimer") == nil then
-                        return
-                    end
-                    fireRoundEndVote(
-                        nextStageToggleRef and nextStageToggleRef.Get(),
-                        retryStageToggleRef and retryStageToggleRef.Get()
-                    )
-                end)
+            if ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil then
+                fireRoundEndVote(
+                    nextStageToggleRef and nextStageToggleRef.Get(),
+                    retryStageToggleRef and retryStageToggleRef.Get()
+                )
             end
-            task.wait(0.25)
+            task.wait(0.35)
         end
     end)
 end
