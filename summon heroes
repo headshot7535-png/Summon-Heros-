@@ -11,7 +11,7 @@
   Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
 
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
-  Story: Queue.LaunchQueue (queue Model) when present, else SetQueue(map,stage); then MapList → StageList → Start in all ScreenGuis.
+  Story: queue touch TP → MapList → StageList → story pad TP → LaunchQueue(queue Model) / SetQueue → Start (all ScreenGuis).
   Optional: getgenv().BonusChestStoryMap; BonusChestStoryStage; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
   Story queue: blue Visual.Main; dungeon: red Main. First time each life: always one teleport to that queue (Main+Door); then no more until respawn. BonusChestStoryQueueReteleport = true to TP again when you leave the area. Story pad skips if already near pad.
   Dungeons: RaidSelect UI — each stage is a MapList row named "Dungeon" with attribute StageNum (1–3). Same Start button in that ScreenGui.
@@ -2745,8 +2745,8 @@ local function findStoryLobbyPadPart()
     return nil
 end
 
---- Teleport HRP onto/near lobby Story pad so MAP SELECTION can open (throttle in caller).
-local function tryTeleportToStoryPad()
+--- Teleport HRP onto/near lobby Story pad. `force` = always snap to pad (use after map+stage, before LaunchQueue).
+local function tryTeleportToStoryPad(force)
     if getgenv and getgenv().BonusChestStoryTeleportToPad == false then
         return false
     end
@@ -2760,7 +2760,7 @@ local function tryTeleportToStoryPad()
         return false
     end
     local padPos = part.Position + Vector3.new(0, 3 + part.Size.Y * 0.5, 0)
-    if (hrp.Position - padPos).Magnitude <= 28 then
+    if not force and (hrp.Position - padPos).Magnitude <= 28 then
         return false
     end
     hrp.CFrame = CFrame.new(padPos)
@@ -3108,7 +3108,7 @@ local function queueTeleportSkipDistance()
     return QUEUE_TELEPORT_SKIP_DIST
 end
 
---- Lobby: optional Door teleport + SetQueue, then map UI row → stage → Start (SetQueue alone often does not load the map).
+--- Lobby: queue Door/Main → map + stage UI → story pad → LaunchQueue / SetQueue → Start.
 local function tryAutoStartStoryOnce(mapKey, stageNum)
     if type(mapKey) ~= "string" or #mapKey == 0 then
         return false, "bad_map"
@@ -3139,38 +3139,6 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
                 tryTeleportToQueueSlotDoor(slotInst)
                 task.wait(0.2)
                 storyQueueLobbyTeleportUsed = true
-            end
-        end
-    end
-
-    local didSetQueue = false
-    if slotInst then
-        local launchEv = resolveLaunchQueueRemote()
-        if launchEv and not (getgenv and getgenv().BonusChestSkipLaunchQueue == true) then
-            didSetQueue = select(1, pcall(function()
-                launchEv:FireServer(slotInst)
-            end))
-            if didSetQueue then
-                task.wait(0.15)
-            end
-        end
-        if not didSetQueue then
-            local setEv = resolveSetQueueRemote()
-            if setEv then
-                local okFire
-                if setEv:IsA("RemoteFunction") then
-                    okFire = select(1, pcall(function()
-                        setEv:InvokeServer(slotInst, mapKey, stageNum)
-                    end))
-                else
-                    okFire = select(1, pcall(function()
-                        setEv:FireServer(slotInst, mapKey, stageNum)
-                    end))
-                end
-                didSetQueue = okFire == true
-                if didSetQueue then
-                    task.wait(0.15)
-                end
             end
         end
     end
@@ -3213,6 +3181,43 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
         guiActivate(stageEntry:IsA("GuiButton") and stageEntry or stageEntry:FindFirstDescendantWhichIsA("GuiButton"))
         task.wait(0.35)
 
+        -- Map + stage are set; snap to Story pad, then LaunchQueue (server expects you on the pad).
+        if not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
+            tryTeleportToStoryPad(true)
+            task.wait(0.28)
+        end
+
+        if slotInst then
+            local launchEv = resolveLaunchQueueRemote()
+            local fired = false
+            if launchEv and not (getgenv and getgenv().BonusChestSkipLaunchQueue == true) then
+                fired = select(1, pcall(function()
+                    launchEv:FireServer(slotInst)
+                end))
+                if fired then
+                    task.wait(0.12)
+                end
+            end
+            if not fired then
+                local setEv = resolveSetQueueRemote()
+                if setEv then
+                    local okFire
+                    if setEv:IsA("RemoteFunction") then
+                        okFire = select(1, pcall(function()
+                            setEv:InvokeServer(slotInst, mapKey, stageNum)
+                        end))
+                    else
+                        okFire = select(1, pcall(function()
+                            setEv:FireServer(slotInst, mapKey, stageNum)
+                        end))
+                    end
+                    if okFire then
+                        task.wait(0.12)
+                    end
+                end
+            end
+        end
+
         local startBtn = findStartButtonInPlayerGui(sg)
         if not startBtn then
             return false, "no_start"
@@ -3223,16 +3228,6 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
         return true, nil
     end
 
-    if didSetQueue then
-        task.wait(0.4)
-        local startBtn = findStartButtonInPlayerGui(nil)
-        if startBtn then
-            guiActivate(startBtn)
-            task.wait(0.1)
-            guiActivate(startBtn)
-        end
-        return true, nil
-    end
     return false, "no_ui"
 end
 
@@ -3969,7 +3964,7 @@ storyStageInputRef = TBattle:Input(
     end
 )
 
-storyStartToggleRef = TBattle:Toggle("Auto start story", "Queue · LaunchQueue or SetQueue · map UI · Start", saved.autoStartStory, function(on)
+storyStartToggleRef = TBattle:Toggle("Auto start story", "Queue TP · map · stage · pad · LaunchQueue/SetQueue · Start", saved.autoStartStory, function(on)
     G.story = G.story + 1
     local g = G.story
     if on then
