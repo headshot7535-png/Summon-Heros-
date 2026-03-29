@@ -4,7 +4,66 @@
 
   NexusLib: optional getgenv().NexusLibPath, then readfile("NexusLib.lua"), then GitHub URLs.
   Requires fireproximityprompt (executor).
+
+  Re-run after server / lobby: uses queue_on_teleport (TeleportService). Optional:
+    getgenv().BonusChestScriptUrl = "https://..."  -- override script URL
+    getgenv().BonusChestNoQueue = true             -- skip queue_on_teleport
+  Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
+
+  Settings file: BonusChests_config.json (or getgenv().BonusChestConfigPath). Requires writefile/readfile.
 ]]
+
+local HttpService = game:GetService("HttpService")
+local CONFIG_FILE = (getgenv and type(getgenv().BonusChestConfigPath) == "string" and getgenv().BonusChestConfigPath)
+    or "BonusChests_config.json"
+
+local function loadConfig()
+    local defaults = { autoCollect = false, queueOnTeleport = true }
+    if not readfile then
+        return defaults
+    end
+    local ok, raw = pcall(readfile, CONFIG_FILE)
+    if not ok or type(raw) ~= "string" or #raw < 3 then
+        return defaults
+    end
+    local ok2, data = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+    if not ok2 or type(data) ~= "table" then
+        return defaults
+    end
+    if type(data.autoCollect) == "boolean" then
+        defaults.autoCollect = data.autoCollect
+    end
+    if type(data.queueOnTeleport) == "boolean" then
+        defaults.queueOnTeleport = data.queueOnTeleport
+    end
+    return defaults
+end
+
+local function saveConfig(payload)
+    if not writefile then
+        return
+    end
+    local ok, json = pcall(function()
+        return HttpService:JSONEncode(payload)
+    end)
+    if not ok or type(json) ~= "string" then
+        return
+    end
+    pcall(writefile, CONFIG_FILE, json)
+end
+
+local saved = loadConfig()
+
+-- Sync teleport opt-out with saved preference before queue_on_teleport runs.
+if getgenv then
+    if saved.queueOnTeleport then
+        getgenv().BonusChestNoQueue = nil
+    else
+        getgenv().BonusChestNoQueue = true
+    end
+end
 
 local NEXUSLIB_URLS = {
     "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib",
@@ -48,6 +107,33 @@ if not NexusLib then
 end
 if not NexusLib or not NexusLib.Window then
     error("[AutoBonusChests] NexusLib failed to load. Check HttpService / readfile.")
+end
+
+-- Raw script (Summon-Heros); re-fetched after teleport / server hop.
+local SCRIPT_SOURCE_URL = (getgenv and getgenv().BonusChestScriptUrl)
+    or "https://raw.githubusercontent.com/headshot7535-png/Summon-Heros-/main/summon%20heroes"
+
+local function tryQueueOnTeleport()
+    if getgenv and getgenv().BonusChestNoQueue == true then
+        return false, "skipped"
+    end
+    local code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
+    local candidates = {
+        typeof(queue_on_teleport) == "function" and queue_on_teleport,
+        typeof(syn) == "table" and syn.queue_on_teleport,
+        typeof(fluxus) == "table" and fluxus.queue_on_teleport,
+        typeof(Krnl) == "table" and Krnl.queue_on_teleport,
+        getgenv and typeof(getgenv().queue_on_teleport) == "function" and getgenv().queue_on_teleport,
+    }
+    for _, fn in ipairs(candidates) do
+        if type(fn) == "function" then
+            local ok = pcall(fn, code)
+            if ok then
+                return true, nil
+            end
+        end
+    end
+    return false, "no_api"
 end
 
 local Players = game:GetService("Players")
@@ -164,8 +250,18 @@ end)
 
 T:Section("Automation")
 
+local function persistSettings(autoGet, queueGet)
+    saveConfig({
+        autoCollect = autoGet and autoGet() or false,
+        queueOnTeleport = queueGet and queueGet() or true,
+    })
+end
+
 local loopGen = 0
-T:Toggle("Auto collect", "Retry every 2 seconds while ON", false, function(on)
+local autoToggleRef
+local queueToggleRef
+
+autoToggleRef = T:Toggle("Auto collect", "Retry every 2 seconds while ON", saved.autoCollect, function(on)
     loopGen = loopGen + 1
     local myGen = loopGen
     if on then
@@ -185,6 +281,66 @@ T:Toggle("Auto collect", "Retry every 2 seconds while ON", false, function(on)
     else
         Win:Status("Auto chests OFF")
     end
+    persistSettings(function() return autoToggleRef.Get() end, function() return queueToggleRef.Get() end)
 end)
 
-Win:Status("Bonus chests · NexusLib")
+T:Section("Session")
+T:Label("Re-runs after game teleports (new server / lobby). Not after full disconnect — use executor auto-exec.")
+
+local reexecQueued = false
+queueToggleRef = T:Toggle(
+    "Queue re-execute on teleport",
+    "Saves to " .. CONFIG_FILE .. " · loads script from GitHub after TeleportService",
+    saved.queueOnTeleport,
+    function(on)
+        if not on then
+            if getgenv then
+                getgenv().BonusChestNoQueue = true
+            end
+            Win:Status("Teleport queue OFF (saved)")
+            Win:Notify("Re-exec", "Saved. No un-queue API for this session — re-paste to clear queue.", 4, "warning")
+            persistSettings(function() return autoToggleRef.Get() end, function() return queueToggleRef.Get() end)
+            return
+        end
+        if getgenv then
+            getgenv().BonusChestNoQueue = nil
+        end
+        local ok, why = tryQueueOnTeleport()
+        reexecQueued = ok
+        if ok then
+            Win:Status("Bonus chests · will re-run on teleport")
+            Win:Notify("Re-exec", "Queued for next server / teleport.", 3, "success")
+        elseif why == "skipped" then
+            Win:Notify("Re-exec", "BonusChestNoQueue is set — clear getgenv().BonusChestNoQueue", 4, "warning")
+        else
+            Win:Notify("Re-exec", "queue_on_teleport missing — enable in executor or use auto-exec.", 5, "warning")
+        end
+        persistSettings(function() return autoToggleRef.Get() end, function() return queueToggleRef.Get() end)
+    end
+)
+
+-- Queue once on load when saved preference allows
+if saved.queueOnTeleport and not (getgenv and getgenv().BonusChestNoQueue == true) then
+    local ok = tryQueueOnTeleport()
+    reexecQueued = ok
+    task.defer(function()
+        if ok then
+            Win:Notify("Re-exec", "Auto: script runs again after teleport / server change.", 4, "success")
+        else
+            Win:Notify("Re-exec", "Could not queue (see Session tab).", 4, "warning")
+        end
+    end)
+end
+
+-- Restore auto loop from saved config (Toggle does not run cb on first paint)
+task.defer(function()
+    if saved.autoCollect and autoToggleRef then
+        autoToggleRef.Set(true)
+    end
+end)
+
+local _wf = writefile and " · settings saved" or " · read-only (no writefile)"
+Win:Status(
+    (reexecQueued and "Bonus chests · teleport queue OK" or "Bonus chests · NexusLib")
+        .. _wf
+)
