@@ -2940,6 +2940,9 @@ local function waitForChestInteract(prompt, timeoutSec)
 end
 
 local function moveToPrompt(root, part, prompt)
+    if not root or not root.Parent or not part or not part.Parent then
+        return
+    end
     local attach = prompt.Parent
     local pos
     if attach and attach:IsA("Attachment") then
@@ -2948,11 +2951,19 @@ local function moveToPrompt(root, part, prompt)
         pos = part.Position
     end
     local maxDist = (prompt.MaxActivationDistance > 0 and prompt.MaxActivationDistance) or 8
-    local offset = (root.Position - pos).Unit * (maxDist * 0.65)
+    local delta = root.Position - pos
+    local offset
+    if delta.Magnitude > 1e-3 then
+        offset = delta.Unit * (maxDist * 0.65)
+    else
+        offset = Vector3.new(0, 0, maxDist * 0.65)
+    end
     if offset.Magnitude < 0.1 then
         offset = Vector3.new(0, 0, maxDist * 0.65)
     end
-    root.CFrame = CFrame.new(pos + offset)
+    pcall(function()
+        root.CFrame = CFrame.new(pos + offset)
+    end)
 end
 
 --- progressCb(i, total, msg) optional — e.g. update hint while waiting for E.
@@ -2965,30 +2976,48 @@ local function collectAllChests(progressCb)
     local opened = 0
     local parts = CollectionService:GetTagged("BonusChestPart")
     table.sort(parts, function(a, b)
-        return (a.Position - root.Position).Magnitude < (b.Position - root.Position).Magnitude
+        if not (a and a.Parent and b and b.Parent and root and root.Parent) then
+            return false
+        end
+        local ok, da = pcall(function()
+            return (a.Position - root.Position).Magnitude
+        end)
+        local ok2, db = pcall(function()
+            return (b.Position - root.Position).Magnitude
+        end)
+        if not ok or not ok2 then
+            return false
+        end
+        return da < db
     end)
 
     local n = #parts
     for i, part in ipairs(parts) do
-        local prompt = findChestPrompt(part)
-        if prompt and prompt.Parent and prompt.Enabled then
-            pcall(moveToPrompt, root, part, prompt)
-            task.wait(0.12)
-            if progressCb then
-                progressCb(i, n, ("Chest %d/%d — fireproximityprompt…"):format(i, n))
-            end
-            fireProximityPromptExec(prompt)
-            task.wait(0.7)
-            if prompt.Enabled then
+        root = getRoot()
+        if not root then
+            return opened, nil
+        end
+        if part and part.Parent and part:IsDescendantOf(workspace) then
+            local prompt = findChestPrompt(part)
+            if prompt and prompt.Parent and prompt.Enabled then
+                pcall(moveToPrompt, root, part, prompt)
+                task.wait(0.12)
                 if progressCb then
-                    progressCb(i, n, ("Chest %d/%d — press E or waiting…"):format(i, n))
+                    progressCb(i, n, ("Chest %d/%d — fireproximityprompt…"):format(i, n))
                 end
-                if not waitForChestInteract(prompt, CHEST_WAIT_SEC) then
-                    return opened, "Timed out on chest (try executor fireproximityprompt)"
+                fireProximityPromptExec(prompt)
+                task.wait(0.7)
+                if prompt.Enabled and prompt.Parent then
+                    if progressCb then
+                        progressCb(i, n, ("Chest %d/%d — press E or waiting…"):format(i, n))
+                    end
+                    if not waitForChestInteract(prompt, CHEST_WAIT_SEC) then
+                        return opened, "Timed out on chest (try executor fireproximityprompt)"
+                    end
                 end
+                opened = opened + 1
+                task.wait(0.2)
             end
-            opened = opened + 1
-            task.wait(0.2)
         end
     end
 
@@ -3373,12 +3402,16 @@ autoToggleRef = THome:Toggle("Auto collect", "Every 2s: route with fireproximity
         Win:Status("Auto chests ON")
         task.spawn(function()
             while myGen == G.loop do
-                local n, err = collectAllChests(function(_, _, msg)
-                    setHint(msg)
+                local ok, n, err = pcall(function()
+                    return collectAllChests(function(_, _, msg)
+                        setHint(msg)
+                    end)
                 end)
-                if err then
+                if not ok then
+                    setHint("Chest auto: error — retrying…")
+                elseif err then
                     setHint(err)
-                elseif n > 0 then
+                elseif type(n) == "number" and n > 0 then
                     setHint(("Last pass: %d opened"):format(n))
                     Win:Status(("Auto · last %d"):format(n))
                 end
