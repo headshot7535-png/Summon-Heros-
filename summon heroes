@@ -2795,7 +2795,8 @@ local function collectAllChests(progressCb)
     return opened, nil
 end
 
--- ── NexusLib UI · multi-tab layout ─────────────────────────────
+-- ── NexusLib UI · multi-tab layout (do/end: avoids Luau 200-local limit on script chunk) ──
+do
 local Win = NexusLib:Window({ title = "Summon Heroes", width = 400, height = 760 })
 
 local THome = Win:Tab("🏠", "Home")
@@ -3138,36 +3139,38 @@ local function persistAll()
     })
 end
 
-local loopGen = 0
-local reviveGen = 0
-local readyGen = 0
-local stageGen = 0
-local redeemGen = 0
-local storyGen = 0
-local dungeonGen = 0
-local shopGen = 0
-local fuseGen = 0
-local summonGen = 0
-local statRerollGen = 0
-local traitRerollGen = 0
-local questClaimGen = 0
-local lastStoryLockStatus = 0
-local lastStoryPadTeleportAt = 0
-local lastStoryNoStartHintAt = 0
-local lastStoryStartNotifyAt = 0
-local lastDungeonLockStatus = 0
-local lastShopHintTime = 0
-local lastFuseHintTime = 0
+local G = {
+    loop = 0,
+    revive = 0,
+    ready = 0,
+    stage = 0,
+    redeem = 0,
+    story = 0,
+    dungeon = 0,
+    shop = 0,
+    fuse = 0,
+    summon = 0,
+    statReroll = 0,
+    traitReroll = 0,
+    questClaim = 0,
+    lastStoryLock = 0,
+    lastStoryPadTp = 0,
+    lastStoryNoStart = 0,
+    lastStoryStartNotify = 0,
+    lastDungeonLock = 0,
+    lastShopHint = 0,
+    lastFuseHint = 0,
+}
 
 local refreshStageWatcher
 
 autoToggleRef = THome:Toggle("Auto collect", "Every 2s: route with fireproximityprompt + chests", saved.autoCollect, function(on)
-    loopGen = loopGen + 1
-    local myGen = loopGen
+    G.loop = G.loop + 1
+    local myGen = G.loop
     if on then
         Win:Status("Auto chests ON")
         task.spawn(function()
-            while myGen == loopGen do
+            while myGen == G.loop do
                 local n, err = collectAllChests(function(_, _, msg)
                     setHint(msg)
                 end)
@@ -3191,11 +3194,11 @@ TBattle:Section("Revive")
 TBattle:Label("TryReviveUnit only if slot has no live unit (workspace.Units + DataRef) or HP ≤ 0.")
 
 reviveToggleRef = TBattle:Toggle("Auto revive", "Fire revive on equipped slots every 1.5s", saved.autoRevive, function(on)
-    reviveGen = reviveGen + 1
-    local myR = reviveGen
+    G.revive = G.revive + 1
+    local myR = G.revive
     if on then
         task.spawn(function()
-            while myR == reviveGen do
+            while myR == G.revive do
                 if not getTryReviveRemote() or not getEquippedFolder() then
                     Win:Status("Revive: wait for Profile / Waves")
                 else
@@ -3212,11 +3215,11 @@ TBattle:Section("Map ready")
 TBattle:Label("Waves.Ready only when ReadyButton is on-screen (ScreenGui enabled + ancestor visible).")
 
 readyToggleRef = TBattle:Toggle("Auto ready up", "Checks ~1s · same as Ready in map HUD", saved.autoReadyUp, function(on)
-    readyGen = readyGen + 1
-    local myReady = readyGen
+    G.ready = G.ready + 1
+    local myReady = G.ready
     if on then
         task.spawn(function()
-            while myReady == readyGen do
+            while myReady == G.ready do
                 fireMapReady()
                 task.wait(1)
             end
@@ -3249,11 +3252,11 @@ storyStageInputRef = TBattle:Input(
 )
 
 storyStartToggleRef = TBattle:Toggle("Auto start story", "While map-select UI is visible (~0.55s)", saved.autoStartStory, function(on)
-    storyGen = storyGen + 1
-    local g = storyGen
+    G.story = G.story + 1
+    local g = G.story
     if on then
         task.spawn(function()
-            while g == storyGen do
+            while g == G.story do
                 local mapKey = saved.storyMapKey
                 if getgenv and type(getgenv().BonusChestStoryMap) == "string" and #getgenv().BonusChestStoryMap > 0 then
                     mapKey = getgenv().BonusChestStoryMap
@@ -3272,28 +3275,28 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "While map-select UI is
                 local ok, why = tryAutoStartStoryOnce(mapKey, st)
                 if ok then
                     local tn0 = os.clock()
-                    if tn0 - lastStoryStartNotifyAt > 8 then
-                        lastStoryStartNotifyAt = tn0
+                    if tn0 - G.lastStoryStartNotify > 8 then
+                        G.lastStoryStartNotify = tn0
                         Win:Notify("Story", ("Starting %s · stage %s"):format(tostring(mapKey), tostring(st)), 3, "success")
                     end
                 elseif why == "map_locked" or why == "stage_locked" then
                     local t = os.clock()
-                    if t - lastStoryLockStatus > 4 then
-                        lastStoryLockStatus = t
+                    if t - G.lastStoryLock > 4 then
+                        G.lastStoryLock = t
                         Win:Status("Story: locked — clear requirement or pick another map/stage")
                     end
                 elseif why == "no_ui" then
                     local t = os.clock()
-                    if t - lastStoryPadTeleportAt > 2.5 then
-                        lastStoryPadTeleportAt = t
+                    if t - G.lastStoryPadTp > 2.5 then
+                        G.lastStoryPadTp = t
                         if tryTeleportToStoryPad() then
                             Win:Status("Story: teleporting to Story pad (stand until menu opens)")
                         end
                     end
                 elseif why == "no_start" then
                     local tn = os.clock()
-                    if tn - lastStoryNoStartHintAt > 5 then
-                        lastStoryNoStartHintAt = tn
+                    if tn - G.lastStoryNoStart > 5 then
+                        G.lastStoryNoStart = tn
                         Win:Status("Story: Start button not found — update game UI or use executor with getconnections")
                     end
                 end
@@ -3330,11 +3333,11 @@ dungeonStageDropdownRef = TBattle:Dropdown(
 )
 
 dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "While raid/dungeon picker is visible (~0.55s)", saved.autoStartDungeon, function(on)
-    dungeonGen = dungeonGen + 1
-    local g = dungeonGen
+    G.dungeon = G.dungeon + 1
+    local g = G.dungeon
     if on then
         task.spawn(function()
-            while g == dungeonGen do
+            while g == G.dungeon do
                 local raidKey = saved.dungeonRaidKey
                 if getgenv and type(getgenv().BonusChestDungeonRaidKey) == "string" and #getgenv().BonusChestDungeonRaidKey > 0 then
                     raidKey = getgenv().BonusChestDungeonRaidKey
@@ -3361,8 +3364,8 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "While raid/dungeon
                     Win:Notify("Dungeon", ("Starting %s · stage %s"):format(tostring(raidKey), tostring(dst)), 3, "success")
                 elseif why == "map_locked" then
                     local t = os.clock()
-                    if t - lastDungeonLockStatus > 4 then
-                        lastDungeonLockStatus = t
+                    if t - G.lastDungeonLock > 4 then
+                        G.lastDungeonLock = t
                         Win:Status("Dungeon: row locked (level / hourly limit) — change stage or wait")
                     end
                 end
@@ -3536,11 +3539,11 @@ TUnits:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time
 end)
 
 fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile is loaded", saved.autoFuseUnits, function(on)
-    fuseGen = fuseGen + 1
-    local g = fuseGen
+    G.fuse = G.fuse + 1
+    local g = G.fuse
     if on then
         task.spawn(function()
-            while g == fuseGen do
+            while g == G.fuse do
                 local o = {
                     minStars = saved.fuseMinStars,
                     maxStars = saved.fuseMaxStars,
@@ -3585,8 +3588,8 @@ fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile i
                     Win:Notify("Fuse", "Auto fusion completed.", 2, "success")
                 elseif why == "no_profile" or why == "no_inventory" or why == "no_fusion" then
                     local t = os.clock()
-                    if t - lastFuseHintTime > 12 then
-                        lastFuseHintTime = t
+                    if t - G.lastFuseHint > 12 then
+                        G.lastFuseHint = t
                         Win:Status("Fuse: wait for profile / UnitFusion")
                     end
                 end
@@ -3679,11 +3682,11 @@ TUnits:Button("✨", "Summon once", "BuyPack or BuyMythicBanner once", nil, func
 end)
 
 summonToggleRef = TUnits:Toggle("Auto summon heroes", "Every ~1.2s · same as shop button cooldown", saved.autoSummon, function(on)
-    summonGen = summonGen + 1
-    local g = summonGen
+    G.summon = G.summon + 1
+    local g = G.summon
     if on then
         task.spawn(function()
-            while g == summonGen do
+            while g == G.summon do
                 local _, pack = summonPackDropdownRef.Get()
                 pack = (type(pack) == "string" and pack) or saved.summonPack
                 if getgenv and type(getgenv().BonusChestSummonPack) == "string" and #getgenv().BonusChestSummonPack > 0 then
@@ -3733,11 +3736,11 @@ rotatingShopFilterInputRef = TShop:Input(
 )
 
 rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s between purchases", saved.autoBuyRotatingShop, function(on)
-    shopGen = shopGen + 1
-    local g = shopGen
+    G.shop = G.shop + 1
+    local g = G.shop
     if on then
         task.spawn(function()
-            while g == shopGen do
+            while g == G.shop do
                 local shopKey = saved.rotatingShopKey
                 if getgenv and type(getgenv().BonusChestRotatingShopKey) == "string" and #getgenv().BonusChestRotatingShopKey > 0 then
                     shopKey = getgenv().BonusChestRotatingShopKey
@@ -3758,20 +3761,20 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
                     Win:Notify("Shop", ("Bought %d item(s)"):format(n), 3, "success")
                 elseif why == "no_filter" then
                     local t = os.clock()
-                    if t - lastShopHintTime > 8 then
-                        lastShopHintTime = t
+                    if t - G.lastShopHint > 8 then
+                        G.lastShopHint = t
                         Win:Status("Shop: set filter (* or ItemName list) to auto-buy")
                     end
                 elseif why == "no_remote" or why == "no_module" then
                     local t = os.clock()
-                    if t - lastShopHintTime > 10 then
-                        lastShopHintTime = t
+                    if t - G.lastShopHint > 10 then
+                        G.lastShopHint = t
                         Win:Status("Shop: RotatingShops module or BuyItem remote missing")
                     end
                 elseif why == "no_items" then
                     local t = os.clock()
-                    if t - lastShopHintTime > 10 then
-                        lastShopHintTime = t
+                    if t - G.lastShopHint > 10 then
+                        G.lastShopHint = t
                         Win:Status("Shop: no item list — wrong shop key or API changed")
                     end
                 end
@@ -3891,12 +3894,12 @@ TRoll:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent pe
 end)
 
 statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls or toggle off", saved.autoStatReroll, function(on)
-    statRerollGen = statRerollGen + 1
-    local g = statRerollGen
+    G.statReroll = G.statReroll + 1
+    local g = G.statReroll
     if on then
         task.spawn(function()
             local rolls = 0
-            while g == statRerollGen do
+            while g == G.statReroll do
                 local maxR = tonumber(statRerollMaxRollsInputRef.Get()) or saved.statRerollMaxRolls
                 if getgenv and type(getgenv().BonusChestStatRerollMaxRolls) == "number" then
                     maxR = getgenv().BonusChestStatRerollMaxRolls
@@ -4062,15 +4065,15 @@ TRoll:Button("🧬", "Reroll trait once", "BuyTraitReroll then UseNew or KeepCur
 end)
 
 traitRerollToggleRef = TRoll:Toggle("Auto trait reroll", "Until goal: stops when a goal matches. Caps at max rolls.", saved.autoTraitReroll, function(on)
-    traitRerollGen = traitRerollGen + 1
-    local g = traitRerollGen
+    G.traitReroll = G.traitReroll + 1
+    local g = G.traitReroll
     if on then
         if traitRerollSkipAnimToggleRef and traitRerollSkipAnimToggleRef.Get() then
             trySetSkipTraitRerollAnim(true)
         end
         task.spawn(function()
             local rolls = 0
-            while g == traitRerollGen do
+            while g == G.traitReroll do
                 local maxR = tonumber(traitRerollMaxRollsInputRef.Get()) or saved.traitRerollMaxRolls
                 if getgenv and type(getgenv().BonusChestTraitRerollMaxRolls) == "number" then
                     maxR = getgenv().BonusChestTraitRerollMaxRolls
@@ -4181,8 +4184,8 @@ TRewards:Button("📜", "Claim all now", "Achievements + Daily claim pass", nil,
 end)
 
 local function restartQuestAutoClaimLoop()
-    questClaimGen = questClaimGen + 1
-    local g = questClaimGen
+    G.questClaim = G.questClaim + 1
+    local g = G.questClaim
     local wantA = claimAchievementsToggleRef and claimAchievementsToggleRef.Get()
     local wantD = claimDailyToggleRef and claimDailyToggleRef.Get()
     if not wantA and not wantD then
@@ -4190,7 +4193,7 @@ local function restartQuestAutoClaimLoop()
         return
     end
     task.spawn(function()
-        while g == questClaimGen do
+        while g == G.questClaim do
             local a = claimAchievementsToggleRef and claimAchievementsToggleRef.Get()
             local d = claimDailyToggleRef and claimDailyToggleRef.Get()
             if not a and not d then
@@ -4240,11 +4243,11 @@ TRewards:Button("🎁", "Redeem all now", "Fire every code once (server may reje
 end)
 
 redeemToggleRef = TRewards:Toggle("Auto redeem codes", "Retry full list every 2 min (for new codes)", saved.autoRedeemCodes, function(on)
-    redeemGen = redeemGen + 1
-    local myRedeem = redeemGen
+    G.redeem = G.redeem + 1
+    local myRedeem = G.redeem
     if on then
         task.spawn(function()
-            while myRedeem == redeemGen do
+            while myRedeem == G.redeem do
                 local ok, why = redeemPromoCodesOnce()
                 if why == "no_remote" then
                     Win:Status("Codes: PromoCodes missing")
@@ -4259,8 +4262,8 @@ redeemToggleRef = TRewards:Toggle("Auto redeem codes", "Retry full list every 2 
 end)
 
 refreshStageWatcher = function()
-    stageGen = stageGen + 1
-    local g = stageGen
+    G.stage = G.stage + 1
+    local g = G.stage
     local function anyStageAuto()
         return (nextStageToggleRef and nextStageToggleRef.Get())
             or (retryStageToggleRef and retryStageToggleRef.Get())
@@ -4269,7 +4272,7 @@ refreshStageWatcher = function()
         return
     end
     task.spawn(function()
-        while g == stageGen do
+        while g == G.stage do
             if not anyStageAuto() then
                 break
             end
@@ -4439,3 +4442,4 @@ Win:Status(
     (reexecQueued and "Summon Heroes · teleport queue OK" or "Summon Heroes · NexusLib")
         .. _wf
 )
+end
