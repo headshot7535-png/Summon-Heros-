@@ -17,9 +17,10 @@
   NexusLib: optional getgenv().NexusLibPath, then readfile("NexusLib.lua"), then GitHub URLs.
   Chests: TP in range, then executor fireproximityprompt (HoldDuration→0); falls back to E if no executor API.
 
-  Re-run after server / lobby: uses queue_on_teleport (TeleportService). Optional:
+  Re-run after server / lobby: queue_on_teleport on load + OnTeleport(RequestedByServer), like AniPixels. Optional:
     getgenv().BonusChestScriptUrl = "https://..."  -- override script URL
     getgenv().BonusChestNoQueue = true             -- skip queue_on_teleport
+    _G.BonusChest_AutoRejoin = true                -- force auto re-exec on (mirrors AniPixels _G.AniPixels_AutoRejoin)
   Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
 
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
@@ -420,6 +421,72 @@ local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LP = Players.LocalPlayer
+
+-- ── Auto re-exec (same idea as AniPixels): arm queue on load, re-queue on TeleportState.RequestedByServer, sync _G.BonusChest_AutoRejoin, periodic re-arm when toggled back on
+local function syncBonusChestRejoinFlag()
+    pcall(function()
+        if _G then
+            _G.BonusChest_AutoRejoin = (saved.queueOnTeleport ~= false)
+                and not (getgenv and getgenv().BonusChestNoQueue == true)
+        end
+    end)
+end
+
+local function armBonusChestQueue()
+    syncBonusChestRejoinFlag()
+    if getgenv and getgenv().BonusChestNoQueue == true then
+        return false, "skipped"
+    end
+    if saved.queueOnTeleport == false then
+        return false, "off"
+    end
+    return tryQueueOnTeleport()
+end
+
+pcall(function()
+    if _G and _G.BonusChest_AutoRejoin and saved.queueOnTeleport == false then
+        saved.queueOnTeleport = true
+        saveConfig(saved)
+    end
+end)
+syncBonusChestRejoinFlag()
+
+pcall(function()
+    LP.OnTeleport:Connect(function(teleportState)
+        if teleportState ~= Enum.TeleportState.RequestedByServer then
+            return
+        end
+        syncBonusChestRejoinFlag()
+        if saved.queueOnTeleport == false then
+            return
+        end
+        if getgenv and getgenv().BonusChestNoQueue == true then
+            return
+        end
+        local code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
+        if typeof(queue_on_teleport) == "function" then
+            pcall(function()
+                queue_on_teleport(code)
+            end)
+        else
+            tryQueueOnTeleport()
+        end
+    end)
+end)
+
+task.spawn(function()
+    local wasOn = saved.queueOnTeleport ~= false
+        and not (getgenv and getgenv().BonusChestNoQueue == true)
+    while true do
+        task.wait(2)
+        syncBonusChestRejoinFlag()
+        local on = saved.queueOnTeleport ~= false and not (getgenv and getgenv().BonusChestNoQueue == true)
+        if on and not wasOn then
+            pcall(armBonusChestQueue)
+        end
+        wasOn = on
+    end
+end)
 
 --- Lobby if game does not mark an active round (attribute may be absent).
 local function isInLobby()
@@ -3935,6 +4002,7 @@ cleanupOldNexusLibGuiBeforeWindow()
 -- Re-read JSON from disk immediately before building UI (each re-execution uses latest save file).
 saved = loadConfig()
 syncBonusChestNoQueueFromSaved()
+syncBonusChestRejoinFlag()
 Win = NexusLib:Window({ title = "Summon Heroes", width = 400, height = 760 })
 
 local THome = Win:Tab("🏠", "Home")
@@ -5572,12 +5640,12 @@ end)
 
 local TSystem = Win:Tab("⚙", "System")
 TSystem:Section("Session")
-TSystem:Label("Re-runs after game teleports (new server / lobby). Not after full disconnect — use executor auto-exec.")
+TSystem:Label("Auto re-exec (AniPixels-style): queues on load + right before TeleportService. Not after full disconnect — use executor auto-exec.")
 
 local reexecQueued = false
 queueToggleRef = TSystem:Toggle(
-    "Queue re-execute on teleport",
-    "Saves to " .. CONFIG_FILE .. " · loads script from GitHub after TeleportService",
+    "🔁 Auto re-execute",
+    "Re-executes after teleport / server hop · saves to " .. CONFIG_FILE .. " · HttpGet script URL",
     saved.queueOnTeleport,
     function(on)
         if not on then
@@ -5592,6 +5660,7 @@ queueToggleRef = TSystem:Toggle(
         if getgenv then
             getgenv().BonusChestNoQueue = nil
         end
+        -- Queue immediately (saved may not reflect ON until persistAll runs)
         local ok, why = tryQueueOnTeleport()
         reexecQueued = ok
         if ok then
@@ -5606,9 +5675,9 @@ queueToggleRef = TSystem:Toggle(
     end
 )
 
--- Queue once on load when saved preference allows
+-- Queue once on load when saved preference allows (armBonusChestQueue = AniPixels armQueue)
 if saved.queueOnTeleport and not (getgenv and getgenv().BonusChestNoQueue == true) then
-    local ok = tryQueueOnTeleport()
+    local ok = armBonusChestQueue()
     reexecQueued = ok
     task.defer(function()
         if ok then
@@ -5714,7 +5783,20 @@ task.defer(function()
         pcall(refreshProfileUnitDropdowns)
     end)
     Win:Status(("Summon Heroes · toggles restored from latest save · %s"):format(CONFIG_FILE))
-    print(("[AutoBonusChests] Save/load OK · GUI cleaned · toggles synced from %s"):format(CONFIG_FILE))
+    -- This runs once per script execution. If the console floods, the whole script is re-running (executor auto-exec, etc.) — not a loop here. Optional: getgenv().BonusChestVerboseInit = true to print every run.
+    local _msg = ("[AutoBonusChests] Save/load OK · GUI cleaned · toggles synced from %s"):format(CONFIG_FILE)
+    if getgenv and getgenv().BonusChestVerboseInit then
+        print(_msg)
+    else
+        local jid = tostring(game.JobId)
+        local st = (getgenv and getgenv()) or _G
+        if type(st) == "table" and st._BonusChestInitLogJob ~= jid then
+            st._BonusChestInitLogJob = jid
+            print(_msg)
+        elseif type(st) ~= "table" then
+            print(_msg)
+        end
+    end
 end)
 
 pcall(function()
