@@ -2124,14 +2124,17 @@ local function collectAllChests(progressCb)
     return opened, nil
 end
 
--- ── NexusLib UI ───────────────────────────────────────────────
-local Win = NexusLib:Window({ title = "Summon Heroes", width = 360, height = 1880 })
+-- ── NexusLib UI · multi-tab layout ─────────────────────────────
+local Win = NexusLib:Window({ title = "Summon Heroes", width = 400, height = 760 })
 
-local T = Win:Tab("✨", "Summon Heroes")
-T:Section("Map chests")
-T:Label("BonusChestPart · TP + fireproximityprompt; E-wait only if prompt stays enabled.")
+local THome = Win:Tab("🏠", "Home")
+THome:Section("Overview")
+THome:Label("Use tabs for each category. Player tab = movement. All settings save to BonusChests_config.json.")
 
-local hint = T:Label("Ready.")
+THome:Section("Bonus chests")
+THome:Label("BonusChestPart · TP + fireproximityprompt; E-wait if prompt stays on.")
+
+local hint = THome:Label("Ready.")
 
 -- Player tab (walk speed + toggles) is created after persistAll() so changes call persistAll — see playerTabRefs below.
 
@@ -2139,7 +2142,7 @@ local function setHint(text)
     hint.Set(text)
 end
 
-T:Button("🎯", "Collect all now", "TP + fireproximityprompt (executor); E fallback", nil, function()
+THome:Button("🎯", "Collect all now", "TP + fireproximityprompt (executor); E fallback", nil, function()
     Win:Status("Opening chests…")
     setHint("Running…")
     task.spawn(function()
@@ -2159,7 +2162,7 @@ T:Button("🎯", "Collect all now", "TP + fireproximityprompt (executor); E fall
     end)
 end)
 
-T:Section("Automation")
+THome:Section("Auto collect")
 
 local autoToggleRef
 local reviveToggleRef
@@ -2440,7 +2443,7 @@ local lastFuseHintTime = 0
 
 local refreshStageWatcher
 
-autoToggleRef = T:Toggle("Auto collect", "Every 2s: route with fireproximityprompt + chests", saved.autoCollect, function(on)
+autoToggleRef = THome:Toggle("Auto collect", "Every 2s: route with fireproximityprompt + chests", saved.autoCollect, function(on)
     loopGen = loopGen + 1
     local myGen = loopGen
     if on then
@@ -2465,10 +2468,11 @@ autoToggleRef = T:Toggle("Auto collect", "Every 2s: route with fireproximityprom
     persistAll()
 end)
 
-T:Section("Revive")
-T:Label("TryReviveUnit only if slot has no live unit (workspace.Units + DataRef) or HP ≤ 0.")
+local TBattle = Win:Tab("⚔", "Battle")
+TBattle:Section("Revive")
+TBattle:Label("TryReviveUnit only if slot has no live unit (workspace.Units + DataRef) or HP ≤ 0.")
 
-reviveToggleRef = T:Toggle("Auto revive", "Fire revive on equipped slots every 1.5s", saved.autoRevive, function(on)
+reviveToggleRef = TBattle:Toggle("Auto revive", "Fire revive on equipped slots every 1.5s", saved.autoRevive, function(on)
     reviveGen = reviveGen + 1
     local myR = reviveGen
     if on then
@@ -2486,10 +2490,10 @@ reviveToggleRef = T:Toggle("Auto revive", "Fire revive on equipped slots every 1
     persistAll()
 end)
 
-T:Section("Map ready")
-T:Label("Waves.Ready only when ReadyButton is on-screen (ScreenGui enabled + ancestor visible).")
+TBattle:Section("Map ready")
+TBattle:Label("Waves.Ready only when ReadyButton is on-screen (ScreenGui enabled + ancestor visible).")
 
-readyToggleRef = T:Toggle("Auto ready up", "Checks ~1s · same as Ready in map HUD", saved.autoReadyUp, function(on)
+readyToggleRef = TBattle:Toggle("Auto ready up", "Checks ~1s · same as Ready in map HUD", saved.autoReadyUp, function(on)
     readyGen = readyGen + 1
     local myReady = readyGen
     if on then
@@ -2503,10 +2507,10 @@ readyToggleRef = T:Toggle("Auto ready up", "Checks ~1s · same as Ready in map H
     persistAll()
 end)
 
-T:Section("Story / map select")
-T:Label("Lobby MAP SELECTION: WaveData row name + stage index, then green Start (Activate).")
+TBattle:Section("Story / map select")
+TBattle:Label("Lobby MAP SELECTION: WaveData row name + stage index, then green Start (Activate).")
 
-storyMapDropdownRef = T:Dropdown(
+storyMapDropdownRef = TBattle:Dropdown(
     "Story map",
     "Internal keys: RookieIsland, VolcanoFortress, …",
     STORY_MAP_OPTIONS,
@@ -2516,7 +2520,7 @@ storyMapDropdownRef = T:Dropdown(
     end
 )
 
-storyStageInputRef = T:Input(
+storyStageInputRef = TBattle:Input(
     "Story stage",
     "1 = Stage 1 (must be unlocked in-game)",
     "3",
@@ -2526,7 +2530,7 @@ storyStageInputRef = T:Input(
     end
 )
 
-storyStartToggleRef = T:Toggle("Auto start story", "While map-select UI is visible (~0.55s)", saved.autoStartStory, function(on)
+storyStartToggleRef = TBattle:Toggle("Auto start story", "While map-select UI is visible (~0.55s)", saved.autoStartStory, function(on)
     storyGen = storyGen + 1
     local g = storyGen
     if on then
@@ -2566,10 +2570,10 @@ storyStartToggleRef = T:Toggle("Auto start story", "While map-select UI is visib
     persistAll()
 end)
 
-T:Section("Dungeons (raid select)")
-T:Label("RaidSelect: pick the row for that dungeon stage, then Start. Default raid key is Dungeon.")
+TBattle:Section("Dungeons (raid select)")
+TBattle:Label("RaidSelect: pick the row for that dungeon stage, then Start. Default raid key is Dungeon.")
 
-dungeonRaidKeyInputRef = T:Input(
+dungeonRaidKeyInputRef = TBattle:Input(
     "Raid WaveData key",
     "Usually Dungeon (IsRaid maps in RaidSelect)",
     "Dungeon",
@@ -2579,7 +2583,7 @@ dungeonRaidKeyInputRef = T:Input(
     end
 )
 
-dungeonStageDropdownRef = T:Dropdown(
+dungeonStageDropdownRef = TBattle:Dropdown(
     "Dungeon stage",
     "Matches MapList row StageNum attribute",
     DUNGEON_STAGE_OPTIONS,
@@ -2589,7 +2593,7 @@ dungeonStageDropdownRef = T:Dropdown(
     end
 )
 
-dungeonStartToggleRef = T:Toggle("Auto start dungeon", "While raid/dungeon picker is visible (~0.55s)", saved.autoStartDungeon, function(on)
+dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "While raid/dungeon picker is visible (~0.55s)", saved.autoStartDungeon, function(on)
     dungeonGen = dungeonGen + 1
     local g = dungeonGen
     if on then
@@ -2635,10 +2639,28 @@ dungeonStartToggleRef = T:Toggle("Auto start dungeon", "While raid/dungeon picke
     persistAll()
 end)
 
-T:Section("Unit fusion")
-T:Label("UnitFusion.PurchaseFuse: 1 main + 3 unequipped same-star fodder (lowest level first). Equipped mains tried first.")
+TBattle:Section("Stage vote")
+TBattle:Label("Votes ~0.35s: names + “Next Stage”/“Retry Stage” text, FireServer + Activate; timer fallback.")
 
-fuseMinInputRef = T:Input(
+nextStageToggleRef = TBattle:Toggle("Auto play next map / stage", "Votes Next when the round-end screen offers it", saved.autoPlayNextMap, function()
+    persistAll()
+    if refreshStageWatcher then
+        refreshStageWatcher()
+    end
+end)
+
+retryStageToggleRef = TBattle:Toggle("Auto retry stage", "Votes Retry when Restart is shown (e.g. after a loss)", saved.autoRetryStage, function()
+    persistAll()
+    if refreshStageWatcher then
+        refreshStageWatcher()
+    end
+end)
+
+local TUnits = Win:Tab("👥", "Units")
+TUnits:Section("Unit fusion")
+TUnits:Label("UnitFusion.PurchaseFuse: 1 main + 3 unequipped same-star fodder (lowest level first). Equipped mains tried first.")
+
+fuseMinInputRef = TUnits:Input(
     "Min star tier",
     "Only fuse units at this star count or higher (3–9)",
     "3",
@@ -2648,7 +2670,7 @@ fuseMinInputRef = T:Input(
     end
 )
 
-fuseMaxInputRef = T:Input(
+fuseMaxInputRef = TUnits:Input(
     "Max star tier",
     "Do not fuse above this star (3–9)",
     "9",
@@ -2658,7 +2680,7 @@ fuseMaxInputRef = T:Input(
     end
 )
 
-fuseFodderMaxInputRef = T:Input(
+fuseFodderMaxInputRef = TUnits:Input(
     "Max fodder level",
     "0 = any level; else only sacrifices with Level ≤ this",
     "0",
@@ -2668,7 +2690,7 @@ fuseFodderMaxInputRef = T:Input(
     end
 )
 
-T:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time", nil, function()
+TUnits:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time", nil, function()
     task.spawn(function()
         local ok, why = tryAutoFuseOnce({
             minStars = fuseMinInputRef and tonumber(fuseMinInputRef.Get()) or saved.fuseMinStars,
@@ -2687,7 +2709,7 @@ T:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time", ni
     end)
 end)
 
-fuseToggleRef = T:Toggle("Auto fuse units", "Tries ~every 3s when profile is loaded", saved.autoFuseUnits, function(on)
+fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile is loaded", saved.autoFuseUnits, function(on)
     fuseGen = fuseGen + 1
     local g = fuseGen
     if on then
@@ -2732,27 +2754,120 @@ fuseToggleRef = T:Toggle("Auto fuse units", "Tries ~every 3s when profile is loa
     persistAll()
 end)
 
-T:Section("Stage vote")
-T:Label("Votes ~0.35s: names + “Next Stage”/“Retry Stage” text, FireServer + Activate; timer fallback.")
+TUnits:Section("Summon Heroes")
+TUnits:Label("Summon.BuyPack / BuyMythicBanner. First-time tutorial summon may block until done in-game.")
 
-nextStageToggleRef = T:Toggle("Auto play next map / stage", "Votes Next when the round-end screen offers it", saved.autoPlayNextMap, function()
-    persistAll()
-    if refreshStageWatcher then
-        refreshStageWatcher()
+summonPackDropdownRef = TUnits:Dropdown(
+    "Pack",
+    "Mythic uses shards; A/B use gems or tickets",
+    SUMMON_PACK_OPTIONS,
+    summonPackDefaultIndex(saved.summonPack),
+    function()
+        persistAll()
     end
+)
+
+summonAmountInputRef = TUnits:Input(
+    "Amount (A/B only)",
+    "1–10 rolls per BuyPack",
+    "1",
+    tostring(saved.summonAmount),
+    function()
+        persistAll()
+    end
+)
+
+summonCurrencyDropdownRef = TUnits:Dropdown(
+    "Currency (A/B)",
+    "Ignored for Mythic Banner",
+    SUMMON_CURRENCY_OPTIONS,
+    summonCurrencyDefaultIndex(saved.summonCurrency),
+    function()
+        persistAll()
+    end
+)
+
+summonSellDelayInputRef = TUnits:Input(
+    "Sell delay (sec)",
+    "After PackOpened: wait then sell units matching toggles below",
+    "12",
+    tostring(saved.summonSellDelaySec),
+    function()
+        persistAll()
+    end
+)
+
+TUnits:Label("Match in-game SUMMON “Auto Sell Units” — writes Settings.AutoSell_RarityN.")
+
+sellRareToggleRef = TUnits:Toggle("Auto-sell Rare", "Rarity 3 · AutoSell_Rarity3", saved.autoSellRare, function(on)
+    setAutoSellRarityInGame(3, on)
+    persistAll()
 end)
 
-retryStageToggleRef = T:Toggle("Auto retry stage", "Votes Retry when Restart is shown (e.g. after a loss)", saved.autoRetryStage, function()
+sellEpicToggleRef = TUnits:Toggle("Auto-sell Epic", "Rarity 4", saved.autoSellEpic, function(on)
+    setAutoSellRarityInGame(4, on)
     persistAll()
-    if refreshStageWatcher then
-        refreshStageWatcher()
-    end
 end)
 
-T:Section("Item / PvP shop (rotating)")
-T:Label("RotatingShops.BuyItem · uses ItemName ids (Cupcake, TraitReroll, RareFusionCrystal…). * = buy any affordable + in stock.")
+sellLegendaryToggleRef = TUnits:Toggle("Auto-sell Legendary", "Rarity 5", saved.autoSellLegendary, function(on)
+    setAutoSellRarityInGame(5, on)
+    persistAll()
+end)
 
-rotatingShopDropdownRef = T:Dropdown(
+sellMythicToggleRef = TUnits:Toggle("Auto-sell Mythic", "Rarity 6", saved.autoSellMythic, function(on)
+    setAutoSellRarityInGame(6, on)
+    persistAll()
+end)
+
+TUnits:Button("✨", "Summon once", "BuyPack or BuyMythicBanner once", nil, function()
+    task.spawn(function()
+        local _, pack = summonPackDropdownRef.Get()
+        local amt = tonumber(summonAmountInputRef.Get()) or 1
+        local _, cur = summonCurrencyDropdownRef.Get()
+        local ok, why = trySummonOnce(type(pack) == "string" and pack or "Pack1", amt, type(cur) == "string" and cur or "Gems")
+        if why == "no_summon" then
+            Win:Notify("Summon Heroes", "Summon module not found.", 4, "error")
+        else
+            Win:Notify("Summon Heroes", "Request sent (check gems / tickets / shards / space).", 3, "success")
+        end
+    end)
+end)
+
+summonToggleRef = TUnits:Toggle("Auto summon heroes", "Every ~1.2s · same as shop button cooldown", saved.autoSummon, function(on)
+    summonGen = summonGen + 1
+    local g = summonGen
+    if on then
+        task.spawn(function()
+            while g == summonGen do
+                local _, pack = summonPackDropdownRef.Get()
+                pack = (type(pack) == "string" and pack) or saved.summonPack
+                if getgenv and type(getgenv().BonusChestSummonPack) == "string" and #getgenv().BonusChestSummonPack > 0 then
+                    pack = getgenv().BonusChestSummonPack
+                end
+                local amt = tonumber(summonAmountInputRef.Get()) or saved.summonAmount
+                if getgenv and type(getgenv().BonusChestSummonAmount) == "number" then
+                    amt = getgenv().BonusChestSummonAmount
+                end
+                local _, cur = summonCurrencyDropdownRef.Get()
+                cur = (type(cur) == "string" and cur) or saved.summonCurrency
+                if getgenv and type(getgenv().BonusChestSummonCurrency) == "string" then
+                    cur = getgenv().BonusChestSummonCurrency
+                end
+                trySummonOnce(pack, amt, cur)
+                task.wait(1.2)
+            end
+        end)
+    else
+        Win:Status("Auto summon heroes OFF")
+    end
+    persistAll()
+end)
+
+local TShop = Win:Tab("🏪", "Shop")
+TShop:Section("Rotating shops")
+TShop:Label("RotatingShops.BuyItem · ItemName ids (Cupcake, TraitReroll…). * = any affordable item in stock.")
+
+rotatingShopDropdownRef = TShop:Dropdown(
     "Shop",
     "ItemShop = gold/gems; PvPShop = PVPTokens",
     ROTATING_SHOP_OPTIONS,
@@ -2762,7 +2877,7 @@ rotatingShopDropdownRef = T:Dropdown(
     end
 )
 
-rotatingShopFilterInputRef = T:Input(
+rotatingShopFilterInputRef = TShop:Input(
     "Buy filter",
     "Comma list or * (e.g. Cupcake,Candy,TraitReroll)",
     "Cupcake,Donut",
@@ -2772,7 +2887,7 @@ rotatingShopFilterInputRef = T:Input(
     end
 )
 
-rotatingShopToggleRef = T:Toggle("Auto buy rotating shop", "Every ~2s · ~1s between purchases", saved.autoBuyRotatingShop, function(on)
+rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s between purchases", saved.autoBuyRotatingShop, function(on)
     shopGen = shopGen + 1
     local g = shopGen
     if on then
@@ -2818,119 +2933,11 @@ rotatingShopToggleRef = T:Toggle("Auto buy rotating shop", "Every ~2s · ~1s bet
     persistAll()
 end)
 
-T:Section("Summon Heroes")
-T:Label("Summon.BuyPack / BuyMythicBanner. First-time tutorial summon may block until done in-game.")
+local TRoll = Win:Tab("🎲", "Rerolls")
+TRoll:Section("Stat reroll")
+TRoll:Label("UnitUpgrades.BuyStatReroll + RerollAction. Each roll must end with UseNew or KeepCurrent (game rule).")
 
-summonPackDropdownRef = T:Dropdown(
-    "Pack",
-    "Mythic uses shards; A/B use gems or tickets",
-    SUMMON_PACK_OPTIONS,
-    summonPackDefaultIndex(saved.summonPack),
-    function()
-        persistAll()
-    end
-)
-
-summonAmountInputRef = T:Input(
-    "Amount (A/B only)",
-    "1–10 rolls per BuyPack",
-    "1",
-    tostring(saved.summonAmount),
-    function()
-        persistAll()
-    end
-)
-
-summonCurrencyDropdownRef = T:Dropdown(
-    "Currency (A/B)",
-    "Ignored for Mythic Banner",
-    SUMMON_CURRENCY_OPTIONS,
-    summonCurrencyDefaultIndex(saved.summonCurrency),
-    function()
-        persistAll()
-    end
-)
-
-summonSellDelayInputRef = T:Input(
-    "Sell delay (sec)",
-    "After PackOpened: wait then sell units matching toggles below",
-    "12",
-    tostring(saved.summonSellDelaySec),
-    function()
-        persistAll()
-    end
-)
-
-T:Label("Match in-game SUMMON “Auto Sell Units” — writes Settings.AutoSell_RarityN.")
-
-sellRareToggleRef = T:Toggle("Auto-sell Rare", "Rarity 3 · AutoSell_Rarity3", saved.autoSellRare, function(on)
-    setAutoSellRarityInGame(3, on)
-    persistAll()
-end)
-
-sellEpicToggleRef = T:Toggle("Auto-sell Epic", "Rarity 4", saved.autoSellEpic, function(on)
-    setAutoSellRarityInGame(4, on)
-    persistAll()
-end)
-
-sellLegendaryToggleRef = T:Toggle("Auto-sell Legendary", "Rarity 5", saved.autoSellLegendary, function(on)
-    setAutoSellRarityInGame(5, on)
-    persistAll()
-end)
-
-sellMythicToggleRef = T:Toggle("Auto-sell Mythic", "Rarity 6", saved.autoSellMythic, function(on)
-    setAutoSellRarityInGame(6, on)
-    persistAll()
-end)
-
-T:Button("✨", "Summon once", "BuyPack or BuyMythicBanner once", nil, function()
-    task.spawn(function()
-        local _, pack = summonPackDropdownRef.Get()
-        local amt = tonumber(summonAmountInputRef.Get()) or 1
-        local _, cur = summonCurrencyDropdownRef.Get()
-        local ok, why = trySummonOnce(type(pack) == "string" and pack or "Pack1", amt, type(cur) == "string" and cur or "Gems")
-        if why == "no_summon" then
-            Win:Notify("Summon Heroes", "Summon module not found.", 4, "error")
-        else
-            Win:Notify("Summon Heroes", "Request sent (check gems / tickets / shards / space).", 3, "success")
-        end
-    end)
-end)
-
-summonToggleRef = T:Toggle("Auto summon heroes", "Every ~1.2s · same as shop button cooldown", saved.autoSummon, function(on)
-    summonGen = summonGen + 1
-    local g = summonGen
-    if on then
-        task.spawn(function()
-            while g == summonGen do
-                local _, pack = summonPackDropdownRef.Get()
-                pack = (type(pack) == "string" and pack) or saved.summonPack
-                if getgenv and type(getgenv().BonusChestSummonPack) == "string" and #getgenv().BonusChestSummonPack > 0 then
-                    pack = getgenv().BonusChestSummonPack
-                end
-                local amt = tonumber(summonAmountInputRef.Get()) or saved.summonAmount
-                if getgenv and type(getgenv().BonusChestSummonAmount) == "number" then
-                    amt = getgenv().BonusChestSummonAmount
-                end
-                local _, cur = summonCurrencyDropdownRef.Get()
-                cur = (type(cur) == "string" and cur) or saved.summonCurrency
-                if getgenv and type(getgenv().BonusChestSummonCurrency) == "string" then
-                    cur = getgenv().BonusChestSummonCurrency
-                end
-                trySummonOnce(pack, amt, cur)
-                task.wait(1.2)
-            end
-        end)
-    else
-        Win:Status("Auto summon heroes OFF")
-    end
-    persistAll()
-end)
-
-T:Section("Stat reroll")
-T:Label("UnitUpgrades.BuyStatReroll + RerollAction. Each roll must end with UseNew or KeepCurrent (game rule).")
-
-statRerollUnitInputRef = T:Input(
+statRerollUnitInputRef = TRoll:Input(
     "Unit name",
     "Substring match; empty = highest level equipped, else inventory",
     "",
@@ -2940,7 +2947,7 @@ statRerollUnitInputRef = T:Input(
     end
 )
 
-statRerollModeDropdownRef = T:Dropdown(
+statRerollModeDropdownRef = TRoll:Dropdown(
     "Policy",
     "Better = sum of letter tiers on unlocked stats only (Curves.LetterMultiplier if present)",
     STAT_REROLL_MODE_OPTIONS,
@@ -2950,23 +2957,23 @@ statRerollModeDropdownRef = T:Dropdown(
     end
 )
 
-statRerollLockAtkToggleRef = T:Toggle("Lock Attack", "Same as in-game lock (higher reroll cost)", saved.statRerollLockAttack, function()
+statRerollLockAtkToggleRef = TRoll:Toggle("Lock Attack", "Same as in-game lock (higher reroll cost)", saved.statRerollLockAttack, function()
     persistAll()
 end)
 
-statRerollLockHpToggleRef = T:Toggle("Lock Health", "Keep HP stat letter on reroll", saved.statRerollLockHealth, function()
+statRerollLockHpToggleRef = TRoll:Toggle("Lock Health", "Keep HP stat letter on reroll", saved.statRerollLockHealth, function()
     persistAll()
 end)
 
-statRerollLockCdToggleRef = T:Toggle("Lock Cooldown (CD)", "Keep CD stat letter", saved.statRerollLockCooldown, function()
+statRerollLockCdToggleRef = TRoll:Toggle("Lock Cooldown (CD)", "Keep CD stat letter", saved.statRerollLockCooldown, function()
     persistAll()
 end)
 
-statRerollLockSpdToggleRef = T:Toggle("Lock Speed", "Keep SPD stat letter", saved.statRerollLockSpeed, function()
+statRerollLockSpdToggleRef = TRoll:Toggle("Lock Speed", "Keep SPD stat letter", saved.statRerollLockSpeed, function()
     persistAll()
 end)
 
-statRerollMaxRollsInputRef = T:Input(
+statRerollMaxRollsInputRef = TRoll:Input(
     "Max rolls (0 = ∞)",
     "Auto stops after this many successful BuyStatReroll cycles",
     "0",
@@ -2976,7 +2983,7 @@ statRerollMaxRollsInputRef = T:Input(
     end
 )
 
-statRerollDelayInputRef = T:Input(
+statRerollDelayInputRef = TRoll:Input(
     "Delay (sec)",
     "Wait between auto reroll attempts",
     "1.2",
@@ -2986,7 +2993,7 @@ statRerollDelayInputRef = T:Input(
     end
 )
 
-T:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent per policy", nil, function()
+TRoll:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent per policy", nil, function()
     task.spawn(function()
         local _, mode = statRerollModeDropdownRef.Get()
         local modeStr = (mode == "better" and "better") or "always"
@@ -3014,7 +3021,7 @@ T:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent per po
     end)
 end)
 
-statRerollToggleRef = T:Toggle("Auto stat reroll", "Repeats until max rolls or toggle off", saved.autoStatReroll, function(on)
+statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls or toggle off", saved.autoStatReroll, function(on)
     statRerollGen = statRerollGen + 1
     local g = statRerollGen
     if on then
@@ -3063,10 +3070,10 @@ statRerollToggleRef = T:Toggle("Auto stat reroll", "Repeats until max rolls or t
     persistAll()
 end)
 
-T:Section("Trait reroll")
-T:Label("UnitUpgrades.BuyTraitReroll + TraitRerollAction (or RerollAction). Matches in-game REROLL TRAITS flow.")
+TRoll:Section("Trait reroll")
+TRoll:Label("UnitUpgrades.BuyTraitReroll + TraitRerollAction (or RerollAction). Matches in-game REROLL TRAITS flow.")
 
-traitRerollUnitInputRef = T:Input(
+traitRerollUnitInputRef = TRoll:Input(
     "Unit name",
     "Same rules as stat reroll · substring; empty = highest level equipped / inventory",
     "",
@@ -3076,7 +3083,7 @@ traitRerollUnitInputRef = T:Input(
     end
 )
 
-traitRerollGoalsInputRef = T:Input(
+traitRerollGoalsInputRef = TRoll:Input(
     "Goal traits (comma)",
     "Substring match e.g. Divine,Ultimate,Mythic · required for “until goal” mode",
     "",
@@ -3086,7 +3093,7 @@ traitRerollGoalsInputRef = T:Input(
     end
 )
 
-traitRerollModeDropdownRef = T:Dropdown(
+traitRerollModeDropdownRef = TRoll:Dropdown(
     "Policy",
     "Until goal = keep trait if roll does not match; always apply = always take new trait",
     TRAIT_REROLL_MODE_OPTIONS,
@@ -3096,7 +3103,7 @@ traitRerollModeDropdownRef = T:Dropdown(
     end
 )
 
-traitRerollSkipAnimToggleRef = T:Toggle(
+traitRerollSkipAnimToggleRef = TRoll:Toggle(
     "Skip trait anim (settings)",
     "Tries Settings.SetConfig for SkipTraitRerollAnim / SkipTraitAnim (game-dependent)",
     saved.traitRerollSkipAnim,
@@ -3108,7 +3115,7 @@ traitRerollSkipAnimToggleRef = T:Toggle(
     end
 )
 
-traitRerollMaxRollsInputRef = T:Input(
+traitRerollMaxRollsInputRef = TRoll:Input(
     "Max rolls (0 = ∞)",
     "Safety cap for auto",
     "0",
@@ -3118,7 +3125,7 @@ traitRerollMaxRollsInputRef = T:Input(
     end
 )
 
-traitRerollDelayInputRef = T:Input(
+traitRerollDelayInputRef = TRoll:Input(
     "Delay (sec)",
     "Wait between trait reroll attempts",
     "1.2",
@@ -3128,7 +3135,7 @@ traitRerollDelayInputRef = T:Input(
     end
 )
 
-T:Button("🧬", "Reroll trait once", "BuyTraitReroll then UseNew or KeepCurrent", nil, function()
+TRoll:Button("🧬", "Reroll trait once", "BuyTraitReroll then UseNew or KeepCurrent", nil, function()
     task.spawn(function()
         local _, mode = traitRerollModeDropdownRef.Get()
         local modeStr = (mode == "always_apply" and "always_apply") or "until_goal"
@@ -3166,7 +3173,7 @@ T:Button("🧬", "Reroll trait once", "BuyTraitReroll then UseNew or KeepCurrent
     end)
 end)
 
-traitRerollToggleRef = T:Toggle("Auto trait reroll", "Until goal: stops when a goal matches. Caps at max rolls.", saved.autoTraitReroll, function(on)
+traitRerollToggleRef = TRoll:Toggle("Auto trait reroll", "Until goal: stops when a goal matches. Caps at max rolls.", saved.autoTraitReroll, function(on)
     traitRerollGen = traitRerollGen + 1
     local g = traitRerollGen
     if on then
@@ -3222,10 +3229,11 @@ traitRerollToggleRef = T:Toggle("Auto trait reroll", "Until goal: stops when a g
     persistAll()
 end)
 
-T:Section("Quests (Achievements & Daily)")
-T:Label("Tries Systems.Quests / Achievements / Quest modules + QuestEvent. Server ignores unready claims.")
+local TRewards = Win:Tab("✨", "Rewards")
+TRewards:Section("Quests (Achievements & Daily)")
+TRewards:Label("Tries Systems.Quests / Achievements / Quest modules + QuestEvent. Server ignores unready claims.")
 
-claimQuestsIntervalInputRef = T:Input(
+claimQuestsIntervalInputRef = TRewards:Input(
     "Interval (sec)",
     "How often auto-claim runs (min 5)",
     "45",
@@ -3235,7 +3243,7 @@ claimQuestsIntervalInputRef = T:Input(
     end
 )
 
-T:Button("📜", "Claim all now", "Achievements + Daily claim pass", nil, function()
+TRewards:Button("📜", "Claim all now", "Achievements + Daily claim pass", nil, function()
     task.spawn(function()
         local ok, why = tryClaimAchievementsAndDailyOnce({ achievements = true, daily = true })
         if why == "no_api" then
@@ -3279,20 +3287,20 @@ local function restartQuestAutoClaimLoop()
     end)
 end
 
-claimAchievementsToggleRef = T:Toggle("Auto claim achievements", "Repeats at interval · in-game QUESTS Achievements tab", saved.autoClaimAchievements, function(on)
+claimAchievementsToggleRef = TRewards:Toggle("Auto claim achievements", "Repeats at interval · in-game QUESTS Achievements tab", saved.autoClaimAchievements, function(on)
     restartQuestAutoClaimLoop()
     persistAll()
 end)
 
-claimDailyToggleRef = T:Toggle("Auto claim daily", "Repeats at interval · in-game QUESTS Daily tab", saved.autoClaimDaily, function(on)
+claimDailyToggleRef = TRewards:Toggle("Auto claim daily", "Repeats at interval · in-game QUESTS Daily tab", saved.autoClaimDaily, function(on)
     restartQuestAutoClaimLoop()
     persistAll()
 end)
 
-T:Section("Promo codes")
-T:Label("PromoCodes.ClaimCode · set getgenv().BonusChestPromoCodes or PROMO_CODES_EDIT in script.")
+TRewards:Section("Promo codes")
+TRewards:Label("PromoCodes.ClaimCode · set getgenv().BonusChestPromoCodes or PROMO_CODES_EDIT in script.")
 
-T:Button("🎁", "Redeem all now", "Fire every code once (server may reject duplicates)", nil, function()
+TRewards:Button("🎁", "Redeem all now", "Fire every code once (server may reject duplicates)", nil, function()
     task.spawn(function()
         local ok, why = redeemPromoCodesOnce()
         if why == "no_remote" then
@@ -3305,7 +3313,7 @@ T:Button("🎁", "Redeem all now", "Fire every code once (server may reject dupl
     end)
 end)
 
-redeemToggleRef = T:Toggle("Auto redeem codes", "Retry full list every 2 min (for new codes)", saved.autoRedeemCodes, function(on)
+redeemToggleRef = TRewards:Toggle("Auto redeem codes", "Retry full list every 2 min (for new codes)", saved.autoRedeemCodes, function(on)
     redeemGen = redeemGen + 1
     local myRedeem = redeemGen
     if on then
@@ -3353,11 +3361,12 @@ refreshStageWatcher = function()
     end)
 end
 
-T:Section("Session")
-T:Label("Re-runs after game teleports (new server / lobby). Not after full disconnect — use executor auto-exec.")
+local TSystem = Win:Tab("⚙", "System")
+TSystem:Section("Session")
+TSystem:Label("Re-runs after game teleports (new server / lobby). Not after full disconnect — use executor auto-exec.")
 
 local reexecQueued = false
-queueToggleRef = T:Toggle(
+queueToggleRef = TSystem:Toggle(
     "Queue re-execute on teleport",
     "Saves to " .. CONFIG_FILE .. " · loads script from GitHub after TeleportService",
     saved.queueOnTeleport,
