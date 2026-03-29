@@ -1,6 +1,6 @@
 --[[
   Summon Heroes — FIXED SAVE/LOAD + GUI CLEANUP + full automation (2026). One NexusLib window (Win:Window{ title, width, height }).
-  JSON: BonusChests_config.json (or getgenv().BonusChestConfigPath). persistAll() snapshots Toggle:Get() + inputs → saveConfig — OFF persists false. Toggle callbacks call persistAll() here.
+  JSON: BonusChests_config.json (or getgenv().BonusChestConfigPath). persistAll uses persistToggleBool for toggles — Lua bug fixed: `ref and ref.Get() or saved` was turning OFF into previous saved ON. After write, `saved` is merged from disk for same-session consistency.
   Re-execute: cleanupOldNexusLibGuiBeforeWindow() removes NexusLib_* ScreenGuis only (avoid blanket PlayerGui deletes by "Window"/"Main"). loadConfig() each run; task.defer restores toggles from saved (true/false). Do not destroy CoreGui by name.
   Loop cancellation: each auto feature bumps a generation counter so the previous task.spawn loop exits (no stuck/overlapping loops).
     • G.loop — bonus chests auto   • G.revive — auto revive   • G.ready — map ready
@@ -319,6 +319,17 @@ local function saveConfig(payload)
 end
 
 local saved = loadConfig()
+
+--- NexusLib Toggle:Get() returns boolean false when OFF. In Lua, `ref and ref.Get() or saved.x` wrongly replaces false with saved.x — OFF never persists. Use this instead.
+local function persistToggleBool(ref, defaultWhenNoRef)
+    if ref and type(ref.Get) == "function" then
+        return ref.Get() == true
+    end
+    if type(defaultWhenNoRef) == "boolean" then
+        return defaultWhenNoRef
+    end
+    return false
+end
 
 -- Sync teleport opt-out with saved preference before queue_on_teleport runs.
 if getgenv then
@@ -4011,7 +4022,7 @@ local claimQuestsIntervalInputRef
 local playerTabRefs = {}
 
 -- ==================== SAVE / LOAD ====================
--- persistAll: snapshot current UI (toggle:Get(), dropdowns, inputs) → saveConfig → writefile(JSON). Call from every toggle/input cb so false/off states save.
+-- persistAll: snapshot UI → saveConfig → writefile; then merge JSON back into `saved`. Booleans use persistToggleBool(ref, fallback) — never `ref and ref.Get() or saved.x` for toggles.
 
 persistAll = function()
     local mapVal = saved.storyMapKey
@@ -4093,7 +4104,7 @@ persistAll = function()
     end
     saveConfig({
         autoCollect = autoToggleRef and autoToggleRef.Get() or false,
-        queueOnTeleport = queueToggleRef and queueToggleRef.Get() or true,
+        queueOnTeleport = persistToggleBool(queueToggleRef, saved.queueOnTeleport ~= false),
         autoRevive = reviveToggleRef and reviveToggleRef.Get() or false,
         autoReadyUp = readyToggleRef and readyToggleRef.Get() or false,
         autoPlayNextMap = nextStageToggleRef and nextStageToggleRef.Get() or false,
@@ -4114,7 +4125,7 @@ persistAll = function()
         fuseMaxFodderLevel = math.max(0, math.floor(fFd)),
         fuseMainUnitId = type(fuseMain) == "string" and fuseMain or "",
         fuseSacrificeIds = type(fuseSac) == "string" and fuseSac or "",
-        autoSummon = summonToggleRef and summonToggleRef.Get() or saved.autoSummon,
+        autoSummon = persistToggleBool(summonToggleRef, saved.autoSummon == true),
         summonPack = (function()
             local p = saved.summonPack
             if summonPackDropdownRef then
@@ -4147,11 +4158,11 @@ persistAll = function()
             0,
             120
         ),
-        autoSellRare = sellRareToggleRef and sellRareToggleRef.Get() or saved.autoSellRare,
-        autoSellEpic = sellEpicToggleRef and sellEpicToggleRef.Get() or saved.autoSellEpic,
-        autoSellLegendary = sellLegendaryToggleRef and sellLegendaryToggleRef.Get() or saved.autoSellLegendary,
-        autoSellMythic = sellMythicToggleRef and sellMythicToggleRef.Get() or saved.autoSellMythic,
-        autoStatReroll = statRerollToggleRef and statRerollToggleRef.Get() or saved.autoStatReroll,
+        autoSellRare = persistToggleBool(sellRareToggleRef, saved.autoSellRare == true),
+        autoSellEpic = persistToggleBool(sellEpicToggleRef, saved.autoSellEpic == true),
+        autoSellLegendary = persistToggleBool(sellLegendaryToggleRef, saved.autoSellLegendary == true),
+        autoSellMythic = persistToggleBool(sellMythicToggleRef, saved.autoSellMythic == true),
+        autoStatReroll = persistToggleBool(statRerollToggleRef, saved.autoStatReroll == true),
         statRerollUnitName = (function()
             if statRerollUnitDropdownRef then
                 local _, v = statRerollUnitDropdownRef.Get()
@@ -4161,10 +4172,10 @@ persistAll = function()
             end
             return saved.statRerollUnitName
         end)(),
-        statRerollLockAttack = statRerollLockAtkToggleRef and statRerollLockAtkToggleRef.Get() or saved.statRerollLockAttack,
-        statRerollLockHealth = statRerollLockHpToggleRef and statRerollLockHpToggleRef.Get() or saved.statRerollLockHealth,
-        statRerollLockCooldown = statRerollLockCdToggleRef and statRerollLockCdToggleRef.Get() or saved.statRerollLockCooldown,
-        statRerollLockSpeed = statRerollLockSpdToggleRef and statRerollLockSpdToggleRef.Get() or saved.statRerollLockSpeed,
+        statRerollLockAttack = persistToggleBool(statRerollLockAtkToggleRef, saved.statRerollLockAttack == true),
+        statRerollLockHealth = persistToggleBool(statRerollLockHpToggleRef, saved.statRerollLockHealth == true),
+        statRerollLockCooldown = persistToggleBool(statRerollLockCdToggleRef, saved.statRerollLockCooldown == true),
+        statRerollLockSpeed = persistToggleBool(statRerollLockSpdToggleRef, saved.statRerollLockSpeed == true),
         statRerollMode = (function()
             local m = saved.statRerollMode
             if statRerollModeDropdownRef then
@@ -4184,7 +4195,7 @@ persistAll = function()
             0,
             60
         ),
-        autoTraitReroll = traitRerollToggleRef and traitRerollToggleRef.Get() or saved.autoTraitReroll,
+        autoTraitReroll = persistToggleBool(traitRerollToggleRef, saved.autoTraitReroll == true),
         traitRerollUnitName = (function()
             if traitRerollUnitDropdownRef then
                 local _, v = traitRerollUnitDropdownRef.Get()
@@ -4214,9 +4225,9 @@ persistAll = function()
             0,
             60
         ),
-        traitRerollSkipAnim = traitRerollSkipAnimToggleRef and traitRerollSkipAnimToggleRef.Get() or saved.traitRerollSkipAnim,
-        autoClaimAchievements = claimAchievementsToggleRef and claimAchievementsToggleRef.Get() or saved.autoClaimAchievements,
-        autoClaimDaily = claimDailyToggleRef and claimDailyToggleRef.Get() or saved.autoClaimDaily,
+        traitRerollSkipAnim = persistToggleBool(traitRerollSkipAnimToggleRef, saved.traitRerollSkipAnim == true),
+        autoClaimAchievements = persistToggleBool(claimAchievementsToggleRef, saved.autoClaimAchievements == true),
+        autoClaimDaily = persistToggleBool(claimDailyToggleRef, saved.autoClaimDaily == true),
         claimQuestsIntervalSec = math.clamp(
             math.floor(tonumber(claimQuestsIntervalInputRef and claimQuestsIntervalInputRef.Get() or saved.claimQuestsIntervalSec) or 45),
             5,
@@ -4257,6 +4268,23 @@ persistAll = function()
             return saved.playerGodMode
         end)(),
     })
+    pcall(function()
+        if not readfile then
+            return
+        end
+        local ok, raw = pcall(readfile, CONFIG_FILE)
+        if not ok or type(raw) ~= "string" or #raw < 3 then
+            return
+        end
+        local ok2, data = pcall(function()
+            return HttpService:JSONDecode(raw)
+        end)
+        if ok2 and type(data) == "table" then
+            for k, v in pairs(data) do
+                saved[k] = v
+            end
+        end
+    end)
 end
 
 -- Generation counters: increment on toggle change to invalidate `while myId == G.*` loops (same idea as reviveLoopId / chestLoopId in templates).
