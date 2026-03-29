@@ -13,7 +13,7 @@
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
   Story: MAP SELECTION — tries Systems.Queue.SetQueue:FireServer(workspace.LobbyMap.Queues child, mapKey, stage) when remote + lobby exist; else GUI MapList → StageList → Start. Activate + getconnections when needed.
   Optional: getgenv().BonusChestStoryMap; BonusChestStoryStage; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
-  Story queue: auto-picks LobbyMap.Queues child whose Visual.Main is blue (Neon); dungeon: red Main. Override: BonusChestSetQueueSlotIndex / BonusChestSetQueueSlotName (story), BonusChestDungeonQueueSlotIndex / BonusChestDungeonQueueSlotName (dungeon). Teleports to Visual.Main then Door unless BonusChestStorySkipQueueDoorTeleport = true.
+  Story queue: blue Visual.Main; dungeon: red Main. Queue TP defaults to once per character (respawn resets). BonusChestStoryQueueReteleport = true re-enables TP when you walk away (uses distance). BonusChestQueueTeleportSkipDist widens “already here” check. Story pad TP skips if already near pad.
   Dungeons: RaidSelect UI — each stage is a MapList row named "Dungeon" with attribute StageNum (1–3). Same Start button in that ScreenGui.
   Optional: getgenv().BonusChestDungeonRaidKey = "Dungeon"; getgenv().BonusChestDungeonStage = 1
 
@@ -2704,8 +2704,11 @@ local function tryTeleportToStoryPad()
     if not part or not part:IsA("BasePart") then
         return false
     end
-    local yOff = 3 + part.Size.Y * 0.5
-    hrp.CFrame = CFrame.new(part.Position + Vector3.new(0, yOff, 0))
+    local padPos = part.Position + Vector3.new(0, 3 + part.Size.Y * 0.5, 0)
+    if (hrp.Position - padPos).Magnitude <= 28 then
+        return false
+    end
+    hrp.CFrame = CFrame.new(padPos)
     return true
 end
 
@@ -2979,6 +2982,60 @@ local function tryTeleportToQueueSlotDoor(slotModel)
     return true
 end
 
+local QUEUE_TELEPORT_SKIP_DIST = 72
+
+--- After first queue snap, do not TP again until respawn (unless BonusChestStoryQueueReteleport / dungeon equivalent).
+local storyQueueLobbyTeleportUsed = false
+local dungeonQueueLobbyTeleportUsed = false
+pcall(function()
+    LP.CharacterAdded:Connect(function()
+        storyQueueLobbyTeleportUsed = false
+        dungeonQueueLobbyTeleportUsed = false
+    end)
+end)
+
+local function hrpWithinStudsOfQueueSlot(slotModel, maxDist)
+    maxDist = maxDist or QUEUE_TELEPORT_SKIP_DIST
+    if not slotModel then
+        return false
+    end
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        return false
+    end
+    local hp = hrp.Position
+    local best = math.huge
+    local main = getQueueVisualMainPart(slotModel)
+    if main then
+        best = math.min(best, (hp - main.Position).Magnitude)
+    end
+    local door = slotModel:FindFirstChild("Door", true)
+    if door and door:IsA("BasePart") then
+        best = math.min(best, (hp - door.Position).Magnitude)
+    end
+    if slotModel:IsA("Model") then
+        pcall(function()
+            local piv = slotModel:GetPivot().Position
+            best = math.min(best, (hp - piv).Magnitude)
+            local ext = slotModel:GetExtentsSize()
+            local halfDiag = 0.5 * math.sqrt(ext.X * ext.X + ext.Y * ext.Y + ext.Z * ext.Z)
+            maxDist = math.max(maxDist, halfDiag + 24)
+        end)
+    end
+    if best == math.huge then
+        return false
+    end
+    return best <= maxDist
+end
+
+local function queueTeleportSkipDistance()
+    if getgenv and type(getgenv().BonusChestQueueTeleportSkipDist) == "number" then
+        return math.clamp(getgenv().BonusChestQueueTeleportSkipDist, 8, 120)
+    end
+    return QUEUE_TELEPORT_SKIP_DIST
+end
+
 --- Lobby: optional Door teleport + SetQueue, then map UI row → stage → Start (SetQueue alone often does not load the map).
 local function tryAutoStartStoryOnce(mapKey, stageNum)
     if type(mapKey) ~= "string" or #mapKey == 0 then
@@ -2992,10 +3049,25 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
 
     local slotInst = resolveStoryQueueLobbySlotInstance()
     if slotInst and not (getgenv and getgenv().BonusChestStorySkipQueueDoorTeleport == true) then
-        tryTeleportToQueueVisualMain(slotInst)
-        task.wait(0.15)
-        tryTeleportToQueueSlotDoor(slotInst)
-        task.wait(0.2)
+        local reTp = getgenv and getgenv().BonusChestStoryQueueReteleport == true
+        local skipTp = false
+        if not reTp and storyQueueLobbyTeleportUsed then
+            skipTp = true
+        else
+            skipTp = hrpWithinStudsOfQueueSlot(slotInst, queueTeleportSkipDistance())
+            if getgenv and getgenv().BonusChestStoryQueueTeleportEveryTick == true then
+                skipTp = false
+            end
+        end
+        if not skipTp then
+            tryTeleportToQueueVisualMain(slotInst)
+            task.wait(0.15)
+            tryTeleportToQueueSlotDoor(slotInst)
+            task.wait(0.2)
+            storyQueueLobbyTeleportUsed = true
+        elseif hrpWithinStudsOfQueueSlot(slotInst, queueTeleportSkipDistance()) then
+            storyQueueLobbyTeleportUsed = true
+        end
     end
 
     local didSetQueue = false
@@ -3084,10 +3156,25 @@ local function tryAutoStartDungeonOnce(raidKey, stageNum)
 
     local dSlot = resolveDungeonQueueLobbySlotInstance()
     if dSlot and not (getgenv and getgenv().BonusChestDungeonSkipQueueTeleport == true) then
-        tryTeleportToQueueVisualMain(dSlot)
-        task.wait(0.15)
-        tryTeleportToQueueSlotDoor(dSlot)
-        task.wait(0.2)
+        local reTp = getgenv and getgenv().BonusChestDungeonQueueReteleport == true
+        local skipTp = false
+        if not reTp and dungeonQueueLobbyTeleportUsed then
+            skipTp = true
+        else
+            skipTp = hrpWithinStudsOfQueueSlot(dSlot, queueTeleportSkipDistance())
+            if getgenv and getgenv().BonusChestDungeonQueueTeleportEveryTick == true then
+                skipTp = false
+            end
+        end
+        if not skipTp then
+            tryTeleportToQueueVisualMain(dSlot)
+            task.wait(0.15)
+            tryTeleportToQueueSlotDoor(dSlot)
+            task.wait(0.2)
+            dungeonQueueLobbyTeleportUsed = true
+        elseif hrpWithinStudsOfQueueSlot(dSlot, queueTeleportSkipDistance()) then
+            dungeonQueueLobbyTeleportUsed = true
+        end
     end
 
     local mapList, row = findRaidMapRow(raidKey, stageNum)
