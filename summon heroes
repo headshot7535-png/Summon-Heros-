@@ -1,7 +1,7 @@
 --[[
   Summon Heroes — FIXED SAVE/LOAD + GUI CLEANUP + full automation (2026). One NexusLib window (Win:Window{ title, width, height }).
   JSON: BonusChests_config.json — loadConfig() at script start and again right before NexusLib:Window (re-exec = fresh read from disk). persistAll (debounced ~0.6s) uses persistToggleBool; persistAll(true) flushes immediately (e.g. BindToClose). After save, `saved` is merged from file for same-session reads.
-  Re-execute: cleanupOldNexusLibGuiBeforeWindow() removes NexusLib_* ScreenGuis only (avoid blanket PlayerGui deletes by "Window"/"Main"). loadConfig() each run; task.defer restores toggles from saved (true/false). Do not destroy CoreGui by name.
+  Re-execute: NexusLib IIFE opens with a do-block that removes NexusLib_* ScreenGuis only (avoid blanket PlayerGui deletes by "Window"/"Main"). loadConfig() each run; task.defer restores toggles from saved (true/false). Do not destroy CoreGui by name.
   Loop cancellation: each toggle bumps G.* so the prior loop for that feature exits; re-exec also bumps getgenv()._BonusChestUiGen so all prior UI loops stop (G is re-created each run).
   Re-exec listeners: OnTeleport / CharacterAdded / re-arm loop disconnect or use separate gens so they do not stack.
     • G.loop — bonus chests auto   • G.revive — auto revive   • G.ready — map ready
@@ -4286,8 +4286,13 @@ local function getBonusChestWorldCFrame(inst)
     return nil
 end
 
---- Before creating a new NexusLib window: remove prior NexusLib_* ScreenGuis (re-execute / double-load). NexusLib:Window also destroys same title, but this clears any title change or orphan. Bumps NexusLib global gens so presence/chat loops exit.
-local function cleanupOldNexusLibGuiBeforeWindow()
+-- ── NexusLib UI: IIFE — locals here are not in the script chunk (Luau 200-register limit per function) ──
+-- cleanup for prior NexusLib_* guis lives inside the IIFE (not a top-level `local function`) so the main chunk stays under the 200-register cap.
+local Win
+local persistAll
+;(function()
+local UI_RUN_GEN = bonusChestBumpUiGen()
+do
     pcall(function()
         _G.NexusLib_PresenceGen = (_G.NexusLib_PresenceGen or 0) + 1
     end)
@@ -4306,13 +4311,6 @@ local function cleanupOldNexusLibGuiBeforeWindow()
     end
     task.wait(0.15)
 end
-
--- ── NexusLib UI: IIFE — locals here are not in the script chunk (Luau 200-register limit per function) ──
-local Win
-local persistAll
-;(function()
-local UI_RUN_GEN = bonusChestBumpUiGen()
-cleanupOldNexusLibGuiBeforeWindow()
 -- Re-read JSON from disk immediately before building UI (each re-execution uses latest save file).
 saved = loadConfig()
 syncBonusChestNoQueueFromSaved()
