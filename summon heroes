@@ -11,8 +11,8 @@
   Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
 
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
-  Story: when the MAP SELECTION screen is open, Auto start story selects WaveData map key + stage index, then clicks Start (same as MapList / StageList / StartButton).
-  Optional: getgenv().BonusChestStoryMap = "VolcanoFortress"; getgenv().BonusChestStoryStage = 3
+  Story: MAP SELECTION — picks MapList row (WaveData.Name), StageList row, then Start. Uses Activate + getconnections(MouseButton1Click) when available.
+  Optional: getgenv().BonusChestStoryMap; BonusChestStoryStage; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
   Dungeons: RaidSelect UI — each stage is a MapList row named "Dungeon" with attribute StageNum (1–3). Same Start button in that ScreenGui.
   Optional: getgenv().BonusChestDungeonRaidKey = "Dungeon"; getgenv().BonusChestDungeonStage = 1
 
@@ -21,11 +21,12 @@
   Promo: Systems.PromoCodes.ClaimCode:FireServer(code). Set list via:
     getgenv().BonusChestPromoCodes = { "CODE1", "CODE2" }  or edit PROMO_CODES_EDIT below.
 
-  Item / PvP shops: Systems.RotatingShops — BuyItem:FireServer(shopKey, slotIndex). Uses game modules for stock + CanAfford.
+  Item / PvP shops: Systems.RotatingShops — BuyItem (RemoteEvent/Unreliable/RemoteFunction). Currency may be a Folder; CanAfford optional (server validates).
   Filter: comma-separated ItemName ids (e.g. Cupcake,TraitReroll) or * for any in-stock item you can afford.
   Optional overrides: getgenv().BonusChestRotatingShopKey, getgenv().BonusChestRotatingShopFilter (comma list or * alone).
 
-  Unit fusion: Systems.UnitFusion — PurchaseFuse:InvokeServer(mainUnit, {3× sacrifice}). Sacrifices must be in Profile.Inventory.Units (unequipped), same StarCount; main can be equipped or inventory. Game rules + coins/crystals enforced server-side.
+  Unit fusion: Systems.UnitFusion — PurchaseFuse(main, {3× sac}). Manual selection: exact folder Names (PlayerGui.Profile). Main: Equipped or Inventory/Units. Sacrifices: three comma-separated Names in Inventory/Units only. Empty main + empty sacrifices = auto by star filters.
+  Optional: getgenv().BonusChestFuseMainUnitId, getgenv().BonusChestFuseSacrificeIds = "a,b,c"
 
   Summon: Systems.Summon — BuyPack:FireServer(packName, amount, "Gems"|"SummonTicket"); Mythic: BuyMythicBanner:FireServer().
   Auto-sell: Settings AutoSell_Rarity3..6 (same as SUMMON UI). After PackOpened, script sells matching units after a delay (summon animation).
@@ -37,8 +38,9 @@
   Trait reroll: same UnitUpgrades — BuyTraitReroll(player, unit); confirm with TraitRerollAction or RerollAction("UseNew"|"KeepCurrent"). Until-goal mode keeps current trait if roll does not match comma-separated goals (substring).
   Optional: getgenv().BonusChestTraitRerollUnit; BonusChestTraitRerollGoals; BonusChestTraitRerollMode ("until_goal"|"always_apply"); BonusChestTraitRerollMaxRolls.
 
-  Quests UI (Achievements / Daily): tries Systems.Quests|Achievements|Quest module ClaimAll* methods, then Systems.QuestEvent:FireServer(...). Server rejects invalid claims.
+  Quests UI (Achievements / Daily): Systems.Quests|Achievements|Quest modules, QuestFunction, QuestEvent (ReplicatedStorage.Systems or Remotes.Systems). Bulk + per-quest FireServer("Claim", id) using Profile / Players_Data hints. Server rejects invalid claims.
   Optional: getgenv().BonusChestClaimQuestsIntervalSec
+  If daily claim still misses: getgenv().BonusChestDailyQuestIds = { "InternalQuestKey", ... } (same for BonusChestAchievementQuestIds).
 
   Player tab (NexusLib): walk speed slider + toggles persist to the same JSON when changed; re-open script restores them.
 ]]
@@ -73,6 +75,8 @@ local function loadConfig()
         fuseMinStars = 3,
         fuseMaxStars = 9,
         fuseMaxFodderLevel = 0,
+        fuseMainUnitId = "",
+        fuseSacrificeIds = "",
         autoSummon = false,
         summonPack = "Pack1",
         summonAmount = 1,
@@ -179,6 +183,12 @@ local function loadConfig()
     end
     if type(data.fuseMaxFodderLevel) == "number" and data.fuseMaxFodderLevel >= 0 then
         defaults.fuseMaxFodderLevel = math.floor(data.fuseMaxFodderLevel)
+    end
+    if type(data.fuseMainUnitId) == "string" then
+        defaults.fuseMainUnitId = data.fuseMainUnitId
+    end
+    if type(data.fuseSacrificeIds) == "string" then
+        defaults.fuseSacrificeIds = data.fuseSacrificeIds
     end
     if type(data.autoSummon) == "boolean" then
         defaults.autoSummon = data.autoSummon
@@ -376,6 +386,20 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LP = Players.LocalPlayer
 
+--- ReplicatedStorage.Systems or ReplicatedStorage.Remotes.Systems (game-dependent).
+local function getSystemsFolder()
+    local rs = ReplicatedStorage
+    local s = rs:FindFirstChild("Systems")
+    if s then
+        return s
+    end
+    local rem = rs:FindFirstChild("Remotes")
+    if rem then
+        return rem:FindFirstChild("Systems")
+    end
+    return nil
+end
+
 --- True if this GuiObject and ancestors are visible and owning ScreenGui (if any) is enabled.
 local function guiObjectShownOnScreen(inst)
     if not inst or not inst:IsA("GuiObject") or not inst.Visible then
@@ -478,7 +502,7 @@ local function roundEndRetryUiVisible()
 end
 
 local function getTryReviveRemote()
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local systems = getSystemsFolder()
     local waves = systems and systems:FindFirstChild("Waves")
     return waves and waves:FindFirstChild("TryReviveUnit")
 end
@@ -581,7 +605,7 @@ local function collectPromoCodeStrings()
 end
 
 local function getClaimCodeRemote()
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local systems = getSystemsFolder()
     local promo = systems and systems:FindFirstChild("PromoCodes")
     local r = promo and promo:FindFirstChild("ClaimCode")
     if r and r:IsA("RemoteEvent") then
@@ -608,9 +632,30 @@ local function redeemPromoCodesOnce()
     return true, nil
 end
 
+local function isShopBuyRemote(ev)
+    return ev
+        and (
+            ev:IsA("RemoteEvent")
+            or ev:IsA("UnreliableRemoteEvent")
+            or ev:IsA("RemoteFunction")
+        )
+end
+
+local function fireShopBuy(buyEv, shopKey, slotIndex)
+    if buyEv:IsA("RemoteFunction") then
+        pcall(function()
+            buyEv:InvokeServer(shopKey, slotIndex)
+        end)
+    else
+        pcall(function()
+            buyEv:FireServer(shopKey, slotIndex)
+        end)
+    end
+end
+
 --- RotatingShops (Item Shop / PvP Shop): BuyItem remote + module for GetCurrentShopItems / HasStock.
 local function resolveRotatingShopsBuy()
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local systems = getSystemsFolder()
     if not systems then
         return nil, nil
     end
@@ -627,7 +672,7 @@ local function resolveRotatingShopsBuy()
         modScript = node:FindFirstChild("RotatingShops") or node:FindFirstChildWhichIsA("ModuleScript")
         buyEv = node:FindFirstChild("BuyItem")
     end
-    if not (buyEv and buyEv:IsA("RemoteEvent") and modScript and modScript:IsA("ModuleScript")) then
+    if not (buyEv and isShopBuyRemote(buyEv) and modScript and modScript:IsA("ModuleScript")) then
         return nil, nil
     end
     local ok, mod = pcall(require, modScript)
@@ -637,17 +682,157 @@ local function resolveRotatingShopsBuy()
     return mod, buyEv
 end
 
-local function getCurrencyModule()
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
-    local cur = systems and systems:FindFirstChild("Currency")
-    if not cur or not cur:IsA("ModuleScript") then
+--- Currency is sometimes a Folder with an inner ModuleScript, or named Economy / Wallet.
+local function moduleHasCanAfford(m)
+    return type(m) == "table" and type(m.CanAfford) == "function"
+end
+
+local function tryRequireCurrencyFromNode(node)
+    if not node then
         return nil
     end
-    local ok, m = pcall(require, cur)
-    if ok and type(m) == "table" then
-        return m
+    if node:IsA("ModuleScript") then
+        local ok, m = pcall(require, node)
+        if ok and moduleHasCanAfford(m) then
+            return m
+        end
+        return nil
+    end
+    if node:IsA("Folder") then
+        for _, ch in ipairs(node:GetChildren()) do
+            if ch:IsA("ModuleScript") then
+                local ok, m = pcall(require, ch)
+                if ok and moduleHasCanAfford(m) then
+                    return m
+                end
+            end
+        end
     end
     return nil
+end
+
+local function getCurrencyModule()
+    local systems = getSystemsFolder()
+    if not systems then
+        return nil
+    end
+    for _, name in ipairs({ "Currency", "Economy", "Wallet", "Currencies", "PlayerEconomy" }) do
+        local m = tryRequireCurrencyFromNode(systems:FindFirstChild(name))
+        if m then
+            return m
+        end
+    end
+    return nil
+end
+
+local function currencyCanAfford(cur, lp, price, cType)
+    if not cur or type(cur.CanAfford) ~= "function" then
+        return true
+    end
+    local ok, res = pcall(function()
+        return cur:CanAfford(lp, price, cType)
+    end)
+    if ok and res == true then
+        return true
+    end
+    ok, res = pcall(function()
+        return cur:CanAfford(lp, cType, price)
+    end)
+    if ok and res == true then
+        return true
+    end
+    ok, res = pcall(function()
+        return cur:CanAfford(lp, price)
+    end)
+    return ok and res == true
+end
+
+local function rotatingShopGetItems(rotMod, shopKey)
+    if type(rotMod.GetCurrentShopItems) == "function" then
+        local ok, t = pcall(function()
+            return rotMod:GetCurrentShopItems(shopKey)
+        end)
+        if ok and type(t) == "table" then
+            return t
+        end
+        ok, t = pcall(function()
+            return rotMod:GetCurrentShopItems(LP, shopKey)
+        end)
+        if ok and type(t) == "table" then
+            return t
+        end
+    end
+    if type(rotMod.GetShopItems) == "function" then
+        local ok, t = pcall(function()
+            return rotMod:GetShopItems(shopKey)
+        end)
+        if ok and type(t) == "table" then
+            return t
+        end
+        ok, t = pcall(function()
+            return rotMod:GetShopItems(LP, shopKey)
+        end)
+        if ok and type(t) == "table" then
+            return t
+        end
+    end
+    return nil
+end
+
+local function rotatingShopHasStock(rotMod, shopKey, slotIndex)
+    if type(rotMod.HasStock) ~= "function" then
+        return true
+    end
+    local ok, h = pcall(function()
+        return rotMod:HasStock(LP, shopKey, slotIndex)
+    end)
+    if not ok then
+        return true
+    end
+    if h == true then
+        return true
+    end
+    ok, h = pcall(function()
+        return rotMod:HasStock(shopKey, slotIndex)
+    end)
+    if not ok then
+        return true
+    end
+    return h == true
+end
+
+local function entryPriceAndCurrency(entry)
+    if type(entry) ~= "table" then
+        return nil, nil
+    end
+    if entry.CoinPrice ~= nil then
+        return entry.CoinPrice, "Coins"
+    end
+    if entry.GemsPrice ~= nil then
+        return entry.GemsPrice, "Gems"
+    end
+    if entry.PVPTokensPrice ~= nil then
+        return entry.PVPTokensPrice, "PVPTokens"
+    end
+    if entry.GoldPrice ~= nil then
+        return entry.GoldPrice, "Coins"
+    end
+    local p = entry.Price or entry.Cost
+    local ct = entry.CurrencyType or entry.Currency
+    if type(ct) == "string" then
+        local c = string.lower(ct)
+        if string.find(c, "gem", 1, true) then
+            return p, "Gems"
+        end
+        if string.find(c, "pvp", 1, true) or string.find(c, "token", 1, true) then
+            return p, "PVPTokens"
+        end
+        if string.find(c, "gold", 1, true) or c == "coins" or c == "coin" then
+            return p, "Coins"
+        end
+        return p, ct
+    end
+    return p, nil
 end
 
 --- buyAny: true = * filter. nameSet: lower-case ItemName -> true
@@ -688,37 +873,31 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
     if not buyEv then
         return 0, "no_remote"
     end
-    if not rotMod or type(rotMod.GetCurrentShopItems) ~= "function" or type(rotMod.HasStock) ~= "function" then
+    if not rotMod or type(rotMod) ~= "table" then
         return 0, "no_module"
     end
-    local cur = getCurrencyModule()
-    if not cur or type(cur.CanAfford) ~= "function" then
-        return 0, "no_currency"
-    end
-    local items = rotMod:GetCurrentShopItems(shopKey)
+    local items = rotatingShopGetItems(rotMod, shopKey)
     if type(items) ~= "table" then
         return 0, "no_items"
     end
+    local cur = getCurrencyModule()
     local bought = 0
     for i = 1, 16 do
-        local entry = items[i]
-        if not entry then
-            break
-        end
-        local iname = entry.ItemName
-        local want = buyAny
-        if not want and type(iname) == "string" then
-            want = nameSet[string.lower(iname)] == true
-        end
-        if want and type(iname) == "string" then
-            local hasStock = select(1, rotMod:HasStock(LP, shopKey, i))
-            if hasStock then
-                local price = entry.CoinPrice or entry.GemsPrice or entry.PVPTokensPrice
-                local cType = entry.CoinPrice and "Coins" or (entry.GemsPrice and "Gems" or (entry.PVPTokensPrice and "PVPTokens"))
-                if price and cType and cur:CanAfford(LP, price, cType) then
-                    pcall(function()
-                        buyEv:FireServer(shopKey, i)
-                    end)
+        local entry = items[i] or items[tostring(i)]
+        if entry then
+            local iname = entry.ItemName or entry.Name or entry.Id
+            local want = buyAny
+            if not want and type(iname) == "string" then
+                want = nameSet[string.lower(iname)] == true
+            end
+            if want and type(iname) == "string" and rotatingShopHasStock(rotMod, shopKey, i) then
+                local price, cType = entryPriceAndCurrency(entry)
+                local canBuy = true
+                if price ~= nil and cType ~= nil then
+                    canBuy = currencyCanAfford(cur, LP, price, cType)
+                end
+                if canBuy then
+                    fireShopBuy(buyEv, shopKey, i)
                     bought = bought + 1
                     task.wait(1.05)
                 end
@@ -737,7 +916,7 @@ local function getPlayerProfileFolder()
 end
 
 local function getUnitFusionModule()
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local systems = getSystemsFolder()
     local node = systems and systems:FindFirstChild("UnitFusion")
     if not node then
         return nil
@@ -784,6 +963,43 @@ local function collectFuseFodder(invFolder, stars, excludeMain, maxFodderLevel)
     return list
 end
 
+local function fuseTrim(s)
+    if type(s) ~= "string" then
+        return ""
+    end
+    return (s:match("^%s*(.-)%s*$") or "")
+end
+
+local function fuseParseCommaIds(s)
+    local out = {}
+    for part in string.gmatch(s or "", "[^,]+") do
+        local id = fuseTrim(part)
+        if #id > 0 then
+            out[#out + 1] = id
+        end
+    end
+    return out
+end
+
+local function findFuseMainUnitFolder(equipped, invUnits, unitName)
+    if type(unitName) ~= "string" or #unitName == 0 then
+        return nil
+    end
+    if equipped then
+        local e = equipped:FindFirstChild(unitName)
+        if e then
+            return e
+        end
+    end
+    if invUnits then
+        local i = invUnits:FindFirstChild(unitName)
+        if i then
+            return i
+        end
+    end
+    return nil
+end
+
 --- One fusion if ValidateFusion passes; main first from equipped (by level), then inventory. Returns fused, reason.
 local function tryAutoFuseOnce(opts)
     opts = opts or {}
@@ -808,6 +1024,60 @@ local function tryAutoFuseOnce(opts)
     local fusion = getUnitFusionModule()
     if not fusion or type(fusion.ValidateFusion) ~= "function" or type(fusion.PurchaseFuse) ~= "function" then
         return false, "no_fusion"
+    end
+
+    local mainId = fuseTrim(opts.fuseMainUnitId or "")
+    local sacStr = fuseTrim(opts.fuseSacrificeIds or "")
+    if #mainId > 0 or #sacStr > 0 then
+        if #mainId == 0 or #sacStr == 0 then
+            return false, "bad_manual"
+        end
+        local sacIds = fuseParseCommaIds(sacStr)
+        if #sacIds ~= 3 then
+            return false, "bad_manual"
+        end
+        local main = findFuseMainUnitFolder(equipped, invUnits, mainId)
+        if not main then
+            return false, "no_main"
+        end
+        local sac = {}
+        for i = 1, 3 do
+            local u = invUnits:FindFirstChild(sacIds[i])
+            if not u then
+                return false, "no_sac"
+            end
+            sac[i] = u
+        end
+        if sac[1] == sac[2] or sac[1] == sac[3] or sac[2] == sac[3] then
+            return false, "dup_sac"
+        end
+        local stars = unitAttrStars(main)
+        if stars < minS or stars > maxS then
+            return false, "stars_filter"
+        end
+        if type(fusion.GetUpgradeInfo) == "function" and not fusion:GetUpgradeInfo(stars) then
+            return false, "no_upgrade_tier"
+        end
+        for i = 1, 3 do
+            if sac[i] == main then
+                return false, "main_in_sac"
+            end
+            if unitAttrStars(sac[i]) ~= stars then
+                return false, "star_mismatch"
+            end
+            if unitIsLocked(sac[i]) then
+                return false, "sac_locked"
+            end
+        end
+        local ok = fusion:ValidateFusion(LP, main, sac)
+        if not ok then
+            return false, "validate_fail"
+        end
+        local ok2 = fusion:PurchaseFuse(LP, main, sac)
+        if ok2 == true then
+            return true, nil
+        end
+        return false, "purchase_fail"
     end
 
     local function tryMain(main)
@@ -872,7 +1142,7 @@ local function tryAutoFuseOnce(opts)
 end
 
 local function requireSystemsChildModule(folderName)
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local systems = getSystemsFolder()
     local node = systems and systems:FindFirstChild(folderName)
     if not node then
         return nil
@@ -1004,10 +1274,153 @@ local function tryEnumerateQuestModuleClaims(m, category)
     return false
 end
 
-local function tryFireQuestEventForCategory(category)
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
-    local ev = systems and systems:FindFirstChild("QuestEvent")
-    if not (ev and ev:IsA("RemoteEvent")) then
+--- Systems folders that may host remotes (top-level or under Remotes).
+local function getSystemsFolderCandidates()
+    local list = {}
+    local seen = {}
+    local function add(f)
+        if f and not seen[f] then
+            seen[f] = true
+            list[#list + 1] = f
+        end
+    end
+    add(ReplicatedStorage:FindFirstChild("Systems"))
+    local rem = ReplicatedStorage:FindFirstChild("Remotes")
+    add(rem and rem:FindFirstChild("Systems"))
+    return list
+end
+
+local function findQuestEventRemote()
+    for _, folder in ipairs(getSystemsFolderCandidates()) do
+        local ev = folder:FindFirstChild("QuestEvent")
+        if ev and ev:IsA("RemoteEvent") then
+            return ev
+        end
+    end
+    return nil
+end
+
+local function profileOrDataRootsForQuests()
+    local roots = {}
+    local prof = getPlayerProfileFolder()
+    if prof then
+        roots[#roots + 1] = prof
+    end
+    local pd = ReplicatedStorage:FindFirstChild("Players_Data")
+    local row = pd and pd:FindFirstChild(LP.Name)
+    local data = row and row:FindFirstChild("Data")
+    if data then
+        roots[#roots + 1] = data
+    end
+    return roots
+end
+
+local function ancestorNameLowerHas(inst, stopAt, needle)
+    local p = inst.Parent
+    while p and p ~= stopAt do
+        if string.find(string.lower(p.Name), needle, 1, true) then
+            return true
+        end
+        p = p.Parent
+    end
+    return false
+end
+
+--- Quest ids inferred from replicated Profile / Players_Data (many games use QuestEvent:FireServer("Claim", id) only).
+local function collectQuestIdsForCategory(category)
+    local ids = {}
+    local seen = {}
+    local function add(s)
+        if type(s) ~= "string" or #s < 2 or #s > 96 then
+            return
+        end
+        if not s:match("^[%w_]+$") then
+            return
+        end
+        if seen[s] then
+            return
+        end
+        seen[s] = true
+        ids[#ids + 1] = s
+    end
+    for _, root in ipairs(profileOrDataRootsForQuests()) do
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("StringValue") then
+                local nlow = string.lower(d.Name)
+                local v = d.Value
+                if type(v) == "string" and #v > 0 then
+                    local nameHint = string.find(nlow, "quest", 1, true)
+                        or string.find(nlow, "daily", 1, true)
+                        or string.find(nlow, "achiev", 1, true)
+                        or string.find(nlow, "task", 1, true)
+                        or string.find(nlow, "mission", 1, true)
+                    if nameHint then
+                        if category == "daily" then
+                            if string.find(nlow, "daily", 1, true) or ancestorNameLowerHas(d, root, "daily") then
+                                add(v)
+                            elseif
+                                string.find(nlow, "quest", 1, true)
+                                and not ancestorNameLowerHas(d, root, "achiev")
+                            then
+                                add(v)
+                            end
+                        else
+                            if string.find(nlow, "achiev", 1, true) or ancestorNameLowerHas(d, root, "achiev") then
+                                add(v)
+                            end
+                        end
+                    end
+                end
+                if category == "daily" and ancestorNameLowerHas(d, root, "daily") then
+                    local id = d.Name
+                    if string.lower(id) ~= "template" and id:match("^[%w_]+$") and #id >= 2 then
+                        add(id)
+                    end
+                end
+                if category == "achievement" and ancestorNameLowerHas(d, root, "achiev") then
+                    local id = d.Name
+                    if string.lower(id) ~= "template" and id:match("^[%w_]+$") and #id >= 2 then
+                        add(id)
+                    end
+                end
+            elseif d:IsA("Folder") then
+                local par = d.Parent
+                if par and par ~= root then
+                    local plow = string.lower(par.Name)
+                    local id = d.Name
+                    if string.lower(id) ~= "template" and id:match("^[%w_]+$") and #id >= 2 then
+                        if category == "daily" and string.find(plow, "daily", 1, true) then
+                            add(id)
+                        elseif category == "achievement" and string.find(plow, "achiev", 1, true) then
+                            add(id)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if getgenv then
+        local g = getgenv()
+        if category == "daily" and type(g.BonusChestDailyQuestIds) == "table" then
+            for _, x in ipairs(g.BonusChestDailyQuestIds) do
+                if type(x) == "string" then
+                    add(x)
+                end
+            end
+        elseif category == "achievement" and type(g.BonusChestAchievementQuestIds) == "table" then
+            for _, x in ipairs(g.BonusChestAchievementQuestIds) do
+                if type(x) == "string" then
+                    add(x)
+                end
+            end
+        end
+    end
+    return ids
+end
+
+local function tryFireQuestEventForCategory(category, perIdsCached)
+    local ev = findQuestEventRemote()
+    if not ev then
         return false
     end
     if category == "achievement" then
@@ -1017,12 +1430,35 @@ local function tryFireQuestEventForCategory(category)
         pcall(function()
             ev:FireServer("Claim", "Achievement")
         end)
+        pcall(function()
+            ev:FireServer("ClaimAll")
+        end)
     else
         pcall(function()
             ev:FireServer("ClaimAllDaily")
         end)
         pcall(function()
             ev:FireServer("Claim", "Daily")
+        end)
+        pcall(function()
+            ev:FireServer("ClaimDaily")
+        end)
+        pcall(function()
+            ev:FireServer("ClaimAll")
+        end)
+    end
+    local perIds = perIdsCached or collectQuestIdsForCategory(category)
+    local cap = 48
+    for i = 1, math.min(#perIds, cap) do
+        local qid = perIds[i]
+        pcall(function()
+            ev:FireServer("Claim", qid)
+        end)
+        pcall(function()
+            ev:FireServer("ClaimQuest", qid)
+        end)
+        pcall(function()
+            ev:FireServer("ClaimDaily", qid)
         end)
     end
     return true
@@ -1031,6 +1467,7 @@ end
 --- Returns true if a quest module existed or QuestEvent / QuestFunction was invoked.
 local function tryClaimQuestCategoryOnce(category)
     local used = false
+    local perIds = collectQuestIdsForCategory(category)
     for _, modName in ipairs({ "Quests", "Achievements", "Quest" }) do
         local m = requireSystemsChildModule(modName)
         if m then
@@ -1039,8 +1476,8 @@ local function tryClaimQuestCategoryOnce(category)
             tryEnumerateQuestModuleClaims(m, category)
         end
     end
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
-    if systems then
+    local cap = 48
+    for _, systems in ipairs(getSystemsFolderCandidates()) do
         local rf = systems:FindFirstChild("QuestFunction") or systems:FindFirstChild("QuestInvoke")
         if rf and rf:IsA("RemoteFunction") then
             used = true
@@ -1053,9 +1490,15 @@ local function tryClaimQuestCategoryOnce(category)
                     rf:InvokeServer("ClaimAllDaily")
                 end)
             end
+            for i = 1, math.min(#perIds, cap) do
+                local qid = perIds[i]
+                pcall(function()
+                    rf:InvokeServer("Claim", qid)
+                end)
+            end
         end
     end
-    if tryFireQuestEventForCategory(category) then
+    if tryFireQuestEventForCategory(category, perIds) then
         used = true
     end
     return used
@@ -1171,7 +1614,7 @@ local function schedulePostSummonAutoSell(units)
 end
 
 local function hookSummonPackOpenedAutoSell()
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local systems = getSystemsFolder()
     local summ = systems and systems:FindFirstChild("Summon")
     local pe = summ and summ:FindFirstChild("PackOpened")
     if not pe or not pe:IsA("RemoteEvent") then
@@ -1317,7 +1760,59 @@ local function getStatRerollUnlockedKeys(lockedList)
     return out
 end
 
---- nameFilter: substring (case-insensitive) or empty for highest-level equipped, else inventory.
+--- Shown name from attributes (e.g. "Fire Mage"); falls back to instance Name (GUID).
+local function getUnitDisplayTitle(u)
+    if not u then
+        return ""
+    end
+    for _, k in ipairs({ "UnitName", "DisplayName", "HeroName", "CharacterName", "Name" }) do
+        local v = u:GetAttribute(k)
+        if type(v) == "string" and #v > 0 then
+            return v
+        end
+    end
+    for _, ch in ipairs(u:GetChildren()) do
+        if ch:IsA("StringValue") and (ch.Name == "UnitName" or ch.Name == "DisplayName") then
+            if type(ch.Value) == "string" and #ch.Value > 0 then
+                return ch.Value
+            end
+        end
+    end
+    return u.Name
+end
+
+local function unitNameFilterMatches(inst, filterTrim)
+    if not inst or #filterTrim == 0 then
+        return true
+    end
+    local ft = string.lower(filterTrim)
+    local function subMatch(s)
+        if type(s) ~= "string" then
+            return false
+        end
+        local sl = string.lower(s)
+        return sl == ft or string.find(sl, ft, 1, true) ~= nil
+    end
+    if subMatch(inst.Name) then
+        return true
+    end
+    for _, k in ipairs({ "UnitName", "DisplayName", "HeroName", "CharacterName", "UnitId" }) do
+        local v = inst:GetAttribute(k)
+        if type(v) == "string" and subMatch(v) then
+            return true
+        end
+    end
+    for _, ch in ipairs(inst:GetChildren()) do
+        if ch:IsA("StringValue") and (ch.Name == "UnitName" or ch.Name == "DisplayName" or ch.Name == "Name") then
+            if subMatch(ch.Value) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+--- nameFilter: empty = auto; else exact folder Name under Equipped/Units, or substring on display name / Name.
 local function resolveStatRerollUnit(nameFilter)
     local profile = getPlayerProfileFolder()
     if not profile then
@@ -1329,13 +1824,21 @@ local function resolveStatRerollUnit(nameFilter)
     local filterTrim = type(nameFilter) == "string" and (nameFilter:match("^%s*(.-)%s*$") or "") or ""
     local wantFilter = #filterTrim > 0
 
+    if wantFilter then
+        local direct = equipped and equipped:FindFirstChild(filterTrim)
+        if not direct and invUnits then
+            direct = invUnits:FindFirstChild(filterTrim)
+        end
+        if direct then
+            return direct
+        end
+    end
+
     local function matchName(inst)
         if not wantFilter then
             return true
         end
-        local nm = string.lower(inst.Name)
-        local ft = string.lower(filterTrim)
-        return nm == ft or string.find(nm, ft, 1, true) ~= nil
+        return unitNameFilterMatches(inst, filterTrim)
     end
 
     local best = nil
@@ -1395,6 +1898,71 @@ local function resolveStatRerollUnit(nameFilter)
         end
     end
     return nil
+end
+
+local function dropdownIndexForSavedValue(options, savedVal)
+    if type(savedVal) ~= "string" or #savedVal == 0 then
+        return 1
+    end
+    for i, opt in ipairs(options) do
+        if type(opt) == "table" and opt.value == savedVal then
+            return i
+        end
+    end
+    return 1
+end
+
+local function buildStatTraitUnitOptions()
+    local opts = {
+        { text = "— Auto (highest level) —", value = "" },
+    }
+    local profile = getPlayerProfileFolder()
+    if not profile then
+        return opts
+    end
+    local equipped = profile:FindFirstChild("Equipped")
+    local invUnits = profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+    if equipped then
+        for _, u in ipairs(equipped:GetChildren()) do
+            local title = getUnitDisplayTitle(u)
+            opts[#opts + 1] = {
+                text = string.format("[Eq] %s · Lv%d · ★%d", title, unitAttrLevel(u), unitAttrStars(u)),
+                value = u.Name,
+            }
+        end
+    end
+    if invUnits then
+        for _, u in ipairs(invUnits:GetChildren()) do
+            local title = getUnitDisplayTitle(u)
+            opts[#opts + 1] = {
+                text = string.format("[Inv] %s · Lv%d · ★%d", title, unitAttrLevel(u), unitAttrStars(u)),
+                value = u.Name,
+            }
+        end
+    end
+    return opts
+end
+
+local function buildFuseSacrificeSlotOptions()
+    local opts = {
+        { text = "— None —", value = "" },
+    }
+    local profile = getPlayerProfileFolder()
+    if not profile then
+        return opts
+    end
+    local invUnits = profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+    if not invUnits then
+        return opts
+    end
+    for _, u in ipairs(invUnits:GetChildren()) do
+        local title = getUnitDisplayTitle(u)
+        opts[#opts + 1] = {
+            text = string.format("%s · Lv%d · ★%d", title, unitAttrLevel(u), unitAttrStars(u)),
+            value = u.Name,
+        }
+    end
+    return opts
 end
 
 --- Returns ok, reason where reason: used_new, kept, buy_failed, no_module, no_unit, no_match, all_locked
@@ -1671,7 +2239,7 @@ local function tryTraitRerollOnce(opts)
 end
 
 local function getVoteRemote()
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local systems = getSystemsFolder()
     local voting = systems and systems:FindFirstChild("Voting")
     local ev = voting and voting:FindFirstChild("Vote")
     if ev and ev:IsA("RemoteEvent") then
@@ -1682,7 +2250,7 @@ end
 
 --- Same as RoundEnd UI: Voting:Vote after intermission (Next = next stage/map, Retry = restart stage).
 local function getWavesReadyRemote()
-    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local systems = getSystemsFolder()
     local waves = systems and systems:FindFirstChild("Waves")
     local r = waves and waves:FindFirstChild("Ready")
     if r and r:IsA("RemoteEvent") then
@@ -1713,12 +2281,15 @@ local function fireMapReady()
     return true
 end
 
---- WaveData keys (must match game): used for MAP SELECTION list entry names + SetQueue.
+--- WaveData keys (MapList frame names under List — must match game ReplicatedStorage data).
 local STORY_MAP_OPTIONS = {
     { text = "Rookie Island", value = "RookieIsland" },
     { text = "Volcano Fortress", value = "VolcanoFortress" },
     { text = "Frozen Glacier", value = "FrozenGlacier" },
     { text = "Calamity Canyon", value = "CalamityCanyon" },
+    { text = "Sakura Village", value = "SakuraVillage" },
+    { text = "Evercrest Academy", value = "EvercrestAcademy" },
+    { text = "Dual Wielder", value = "DualWielder" },
 }
 
 local function storyMapOptionIndexForKey(key)
@@ -1779,6 +2350,20 @@ local function findStartButtonInScreenGui(sg)
             return d
         end
     end
+    for _, d in ipairs(sg:GetDescendants()) do
+        if d:IsA("GuiButton") and guiObjectShownOnScreen(d) then
+            local n = string.lower(d.Name)
+            if n == "start" or n == "startbtn" or string.sub(n, 1, 5) == "start" then
+                return d
+            end
+            if d:IsA("TextButton") then
+                local t = string.lower((d.Text or ""):gsub("%s+", ""))
+                if t == "start" or t == "play" then
+                    return d
+                end
+            end
+        end
+    end
     return nil
 end
 
@@ -1814,6 +2399,64 @@ local function findStageListInScreenGui(sg)
     return nil
 end
 
+--- Matches "Stage 3", "STAGE  3", labels with extra spaces/case.
+local function stageListLabelMatches(labText, wantStage)
+    wantStage = tonumber(wantStage)
+    if not wantStage then
+        return false
+    end
+    local raw = tostring(labText or "")
+    if raw == ("Stage " .. tostring(wantStage)) then
+        return true
+    end
+    local low = string.lower(raw:gsub("%s+", " "))
+    local n = tonumber(string.match(low, "^stage%s*(%d+)$"))
+        or tonumber(string.match(low, "stage%s*(%d+)"))
+    return n == wantStage
+end
+
+local function findStoryLobbyPadPart()
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") then
+            local blob = string.lower(
+                tostring(d.ObjectText) .. " " .. tostring(d.ActionText) .. " " .. tostring(d.Name)
+            )
+            if string.find(blob, "story", 1, true) then
+                local p = d.Parent
+                if p and p:IsA("BasePart") then
+                    return p
+                end
+            end
+        end
+    end
+    for _, nm in ipairs({ "StoryPad", "Story_Pad", "LobbyStory", "PadStory", "StorySpawn" }) do
+        local p = workspace:FindFirstChild(nm, true)
+        if p and p:IsA("BasePart") then
+            return p
+        end
+    end
+    return nil
+end
+
+--- Teleport HRP onto/near lobby Story pad so MAP SELECTION can open (throttle in caller).
+local function tryTeleportToStoryPad()
+    if getgenv and getgenv().BonusChestStoryTeleportToPad == false then
+        return false
+    end
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        return false
+    end
+    local part = findStoryLobbyPadPart()
+    if not part or not part:IsA("BasePart") then
+        return false
+    end
+    local yOff = 3 + part.Size.Y * 0.5
+    hrp.CFrame = CFrame.new(part.Position + Vector3.new(0, yOff, 0))
+    return true
+end
+
 --- RaidSelect: one row per raid stage; same Name (e.g. Dungeon) + attribute StageNum.
 local function findRaidMapRow(raidKey, stageNum)
     local pg = LP:FindFirstChild("PlayerGui")
@@ -1835,15 +2478,40 @@ local function findRaidMapRow(raidKey, stageNum)
     return nil, nil
 end
 
+--- Activate() alone often does not run local scripts; executors expose getconnections to fire MouseButton1Click.
+local function fireGuiButtonClick(btn)
+    if not btn or not btn:IsA("GuiButton") then
+        return
+    end
+    pcall(function()
+        btn:Activate()
+    end)
+    pcall(function()
+        local gc = getconnections
+        if type(gc) ~= "function" then
+            return
+        end
+        local conns = gc(btn.MouseButton1Click)
+        if type(conns) ~= "table" then
+            return
+        end
+        for _, conn in ipairs(conns) do
+            local fn = conn.Function
+            if type(fn) == "function" then
+                pcall(fn)
+            end
+        end
+    end)
+end
+
 local function guiActivate(inst)
     if not inst then
         return
     end
-    pcall(function()
-        if inst:IsA("GuiButton") then
-            inst:Activate()
-        end
-    end)
+    local btn = inst:IsA("GuiButton") and inst or inst:FindFirstDescendantWhichIsA("GuiButton")
+    if btn then
+        fireGuiButtonClick(btn)
+    end
 end
 
 --- Clicks map row → stage row → Start when the story map-select UI is visible (Queue:SetQueue path).
@@ -1868,7 +2536,7 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
         return false, "map_locked"
     end
     guiActivate(mapEntry:IsA("GuiButton") and mapEntry or mapEntry:FindFirstDescendantWhichIsA("GuiButton"))
-    task.wait(0.18)
+    task.wait(0.22)
 
     local stageList = findStageListInScreenGui(sg)
     if not stageList then
@@ -1878,12 +2546,11 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
     if not sList then
         return false, "no_stage_list"
     end
-    local want = "Stage " .. tostring(stageNum)
     local stageEntry
     for _, ch in ipairs(sList:GetChildren()) do
         local cont = ch:FindFirstChild("Container")
         local lab = cont and cont:FindFirstChild("Label")
-        if lab and lab:IsA("TextLabel") and lab.Text == want then
+        if lab and lab:IsA("TextLabel") and stageListLabelMatches(lab.Text, stageNum) then
             stageEntry = ch
             break
         end
@@ -1896,12 +2563,14 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
         return false, "stage_locked"
     end
     guiActivate(stageEntry:IsA("GuiButton") and stageEntry or stageEntry:FindFirstDescendantWhichIsA("GuiButton"))
-    task.wait(0.14)
+    task.wait(0.2)
 
     local startBtn = findStartButtonInScreenGui(sg)
     if not startBtn then
         return false, "no_start"
     end
+    guiActivate(startBtn)
+    task.wait(0.08)
     guiActivate(startBtn)
     return true, nil
 end
@@ -1934,6 +2603,8 @@ local function tryAutoStartDungeonOnce(raidKey, stageNum)
     if not startBtn then
         return false, "no_start"
     end
+    guiActivate(startBtn)
+    task.wait(0.08)
     guiActivate(startBtn)
     return true, nil
 end
@@ -2184,6 +2855,11 @@ local fuseToggleRef
 local fuseMinInputRef
 local fuseMaxInputRef
 local fuseFodderMaxInputRef
+local fuseMainUnitDropdownRef
+local fuseSac1DropdownRef
+local fuseSac2DropdownRef
+local fuseSac3DropdownRef
+local refreshProfileUnitDropdowns
 local summonToggleRef
 local summonPackDropdownRef
 local summonAmountInputRef
@@ -2193,7 +2869,7 @@ local sellEpicToggleRef
 local sellLegendaryToggleRef
 local sellMythicToggleRef
 local statRerollToggleRef
-local statRerollUnitInputRef
+local statRerollUnitDropdownRef
 local statRerollModeDropdownRef
 local statRerollMaxRollsInputRef
 local statRerollDelayInputRef
@@ -2202,7 +2878,7 @@ local statRerollLockHpToggleRef
 local statRerollLockCdToggleRef
 local statRerollLockSpdToggleRef
 local traitRerollToggleRef
-local traitRerollUnitInputRef
+local traitRerollUnitDropdownRef
 local traitRerollGoalsInputRef
 local traitRerollModeDropdownRef
 local traitRerollMaxRollsInputRef
@@ -2259,6 +2935,27 @@ local function persistAll()
     local fMin = fuseMinInputRef and tonumber(fuseMinInputRef.Get()) or saved.fuseMinStars
     local fMax = fuseMaxInputRef and tonumber(fuseMaxInputRef.Get()) or saved.fuseMaxStars
     local fFd = fuseFodderMaxInputRef and tonumber(fuseFodderMaxInputRef.Get()) or saved.fuseMaxFodderLevel
+    local fuseMain = saved.fuseMainUnitId
+    if fuseMainUnitDropdownRef then
+        local _, v = fuseMainUnitDropdownRef.Get()
+        if type(v) == "string" then
+            fuseMain = v
+        end
+    end
+    local fuseSac = saved.fuseSacrificeIds
+    if fuseSac1DropdownRef and fuseSac2DropdownRef and fuseSac3DropdownRef then
+        local _, a = fuseSac1DropdownRef.Get()
+        local _, b = fuseSac2DropdownRef.Get()
+        local _, c = fuseSac3DropdownRef.Get()
+        a = type(a) == "string" and a or ""
+        b = type(b) == "string" and b or ""
+        c = type(c) == "string" and c or ""
+        if #a + #b + #c > 0 then
+            fuseSac = a .. "," .. b .. "," .. c
+        else
+            fuseSac = ""
+        end
+    end
     if not fMin then
         fMin = 3
     end
@@ -2294,6 +2991,8 @@ local function persistAll()
         fuseMinStars = fMinCl,
         fuseMaxStars = fMaxCl,
         fuseMaxFodderLevel = math.max(0, math.floor(fFd)),
+        fuseMainUnitId = type(fuseMain) == "string" and fuseMain or "",
+        fuseSacrificeIds = type(fuseSac) == "string" and fuseSac or "",
         autoSummon = summonToggleRef and summonToggleRef.Get() or saved.autoSummon,
         summonPack = (function()
             local p = saved.summonPack
@@ -2332,7 +3031,15 @@ local function persistAll()
         autoSellLegendary = sellLegendaryToggleRef and sellLegendaryToggleRef.Get() or saved.autoSellLegendary,
         autoSellMythic = sellMythicToggleRef and sellMythicToggleRef.Get() or saved.autoSellMythic,
         autoStatReroll = statRerollToggleRef and statRerollToggleRef.Get() or saved.autoStatReroll,
-        statRerollUnitName = statRerollUnitInputRef and statRerollUnitInputRef.Get() or saved.statRerollUnitName,
+        statRerollUnitName = (function()
+            if statRerollUnitDropdownRef then
+                local _, v = statRerollUnitDropdownRef.Get()
+                if type(v) == "string" then
+                    return v
+                end
+            end
+            return saved.statRerollUnitName
+        end)(),
         statRerollLockAttack = statRerollLockAtkToggleRef and statRerollLockAtkToggleRef.Get() or saved.statRerollLockAttack,
         statRerollLockHealth = statRerollLockHpToggleRef and statRerollLockHpToggleRef.Get() or saved.statRerollLockHealth,
         statRerollLockCooldown = statRerollLockCdToggleRef and statRerollLockCdToggleRef.Get() or saved.statRerollLockCooldown,
@@ -2357,7 +3064,15 @@ local function persistAll()
             60
         ),
         autoTraitReroll = traitRerollToggleRef and traitRerollToggleRef.Get() or saved.autoTraitReroll,
-        traitRerollUnitName = traitRerollUnitInputRef and traitRerollUnitInputRef.Get() or saved.traitRerollUnitName,
+        traitRerollUnitName = (function()
+            if traitRerollUnitDropdownRef then
+                local _, v = traitRerollUnitDropdownRef.Get()
+                if type(v) == "string" then
+                    return v
+                end
+            end
+            return saved.traitRerollUnitName
+        end)(),
         traitRerollGoals = traitRerollGoalsInputRef and traitRerollGoalsInputRef.Get() or saved.traitRerollGoals,
         traitRerollMode = (function()
             local m = saved.traitRerollMode
@@ -2437,6 +3152,9 @@ local statRerollGen = 0
 local traitRerollGen = 0
 local questClaimGen = 0
 local lastStoryLockStatus = 0
+local lastStoryPadTeleportAt = 0
+local lastStoryNoStartHintAt = 0
+local lastStoryStartNotifyAt = 0
 local lastDungeonLockStatus = 0
 local lastShopHintTime = 0
 local lastFuseHintTime = 0
@@ -2508,7 +3226,7 @@ readyToggleRef = TBattle:Toggle("Auto ready up", "Checks ~1s · same as Ready in
 end)
 
 TBattle:Section("Story / map select")
-TBattle:Label("Lobby MAP SELECTION: WaveData row name + stage index, then green Start (Activate).")
+TBattle:Label("Map dropdown = MapList instance name (e.g. DualWielder). If UI missing, script TPs to Story ProximityPrompt/pad ~every 2.5s.")
 
 storyMapDropdownRef = TBattle:Dropdown(
     "Story map",
@@ -2553,12 +3271,30 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "While map-select UI is
                 end
                 local ok, why = tryAutoStartStoryOnce(mapKey, st)
                 if ok then
-                    Win:Notify("Story", ("Starting %s · stage %s"):format(tostring(mapKey), tostring(st)), 3, "success")
+                    local tn0 = os.clock()
+                    if tn0 - lastStoryStartNotifyAt > 8 then
+                        lastStoryStartNotifyAt = tn0
+                        Win:Notify("Story", ("Starting %s · stage %s"):format(tostring(mapKey), tostring(st)), 3, "success")
+                    end
                 elseif why == "map_locked" or why == "stage_locked" then
                     local t = os.clock()
                     if t - lastStoryLockStatus > 4 then
                         lastStoryLockStatus = t
                         Win:Status("Story: locked — clear requirement or pick another map/stage")
+                    end
+                elseif why == "no_ui" then
+                    local t = os.clock()
+                    if t - lastStoryPadTeleportAt > 2.5 then
+                        lastStoryPadTeleportAt = t
+                        if tryTeleportToStoryPad() then
+                            Win:Status("Story: teleporting to Story pad (stand until menu opens)")
+                        end
+                    end
+                elseif why == "no_start" then
+                    local tn = os.clock()
+                    if tn - lastStoryNoStartHintAt > 5 then
+                        lastStoryNoStartHintAt = tn
+                        Win:Status("Story: Start button not found — update game UI or use executor with getconnections")
                     end
                 end
                 task.wait(0.55)
@@ -2658,7 +3394,56 @@ end)
 
 local TUnits = Win:Tab("👥", "Units")
 TUnits:Section("Unit fusion")
-TUnits:Label("UnitFusion.PurchaseFuse: 1 main + 3 unequipped same-star fodder (lowest level first). Equipped mains tried first.")
+TUnits:Label("Auto: same-star main + 3 inventory fodder (lowest level). Manual: pick main + 3 sacrifices (inventory). Refresh lists after summon / move units.")
+
+do
+    local statOpts0 = buildStatTraitUnitOptions()
+    local sacOpts0 = buildFuseSacrificeSlotOptions()
+    local sacParts0 = fuseParseCommaIds(saved.fuseSacrificeIds)
+    fuseMainUnitDropdownRef = TUnits:Dropdown(
+        "Fuse main unit",
+        "Equipped or inventory · first row = auto main",
+        statOpts0,
+        dropdownIndexForSavedValue(statOpts0, saved.fuseMainUnitId),
+        function()
+            persistAll()
+        end
+    )
+    fuseSac1DropdownRef = TUnits:Dropdown(
+        "Sacrifice 1",
+        "Inventory only · None = use auto fodder",
+        sacOpts0,
+        dropdownIndexForSavedValue(sacOpts0, sacParts0[1] or ""),
+        function()
+            persistAll()
+        end
+    )
+    fuseSac2DropdownRef = TUnits:Dropdown(
+        "Sacrifice 2",
+        "Must differ from Sac 1/3 and from main",
+        sacOpts0,
+        dropdownIndexForSavedValue(sacOpts0, sacParts0[2] or ""),
+        function()
+            persistAll()
+        end
+    )
+    fuseSac3DropdownRef = TUnits:Dropdown(
+        "Sacrifice 3",
+        "Three picks required for manual fuse (or all None for auto)",
+        sacOpts0,
+        dropdownIndexForSavedValue(sacOpts0, sacParts0[3] or ""),
+        function()
+            persistAll()
+        end
+    )
+end
+
+TUnits:Button("🔄", "Refresh unit lists", "Reload Profile units for dropdowns", nil, function()
+    if refreshProfileUnitDropdowns then
+        pcall(refreshProfileUnitDropdowns)
+    end
+    Win:Status("Unit dropdowns refreshed")
+end)
 
 fuseMinInputRef = TUnits:Input(
     "Min star tier",
@@ -2692,10 +3477,35 @@ fuseFodderMaxInputRef = TUnits:Input(
 
 TUnits:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time", nil, function()
     task.spawn(function()
+        local mainStr = saved.fuseMainUnitId
+        if fuseMainUnitDropdownRef then
+            local _, mainV = fuseMainUnitDropdownRef.Get()
+            mainStr = type(mainV) == "string" and mainV or mainStr
+        end
+        local a, b, c = "", "", ""
+        if fuseSac1DropdownRef then
+            _, a = fuseSac1DropdownRef.Get()
+        end
+        if fuseSac2DropdownRef then
+            _, b = fuseSac2DropdownRef.Get()
+        end
+        if fuseSac3DropdownRef then
+            _, c = fuseSac3DropdownRef.Get()
+        end
+        a, b, c = type(a) == "string" and a or "", type(b) == "string" and b or "", type(c) == "string" and c or ""
+        local sacStr = (#a + #b + #c > 0) and (a .. "," .. b .. "," .. c) or ""
+        if getgenv and type(getgenv().BonusChestFuseMainUnitId) == "string" then
+            mainStr = getgenv().BonusChestFuseMainUnitId
+        end
+        if getgenv and type(getgenv().BonusChestFuseSacrificeIds) == "string" then
+            sacStr = getgenv().BonusChestFuseSacrificeIds
+        end
         local ok, why = tryAutoFuseOnce({
             minStars = fuseMinInputRef and tonumber(fuseMinInputRef.Get()) or saved.fuseMinStars,
             maxStars = fuseMaxInputRef and tonumber(fuseMaxInputRef.Get()) or saved.fuseMaxStars,
             maxFodderLevel = fuseFodderMaxInputRef and tonumber(fuseFodderMaxInputRef.Get()) or saved.fuseMaxFodderLevel,
+            fuseMainUnitId = type(mainStr) == "string" and mainStr or "",
+            fuseSacrificeIds = type(sacStr) == "string" and sacStr or "",
         })
         if ok then
             Win:Notify("Fuse", "Fusion completed.", 3, "success")
@@ -2703,8 +3513,24 @@ TUnits:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time
             Win:Notify("Fuse", "Profile / inventory not ready.", 4, "warning")
         elseif why == "no_fusion" then
             Win:Notify("Fuse", "UnitFusion module not found.", 4, "error")
+        elseif why == "bad_manual" then
+            Win:Notify("Fuse", "Manual: fill Main + 3 comma-separated sacrifice Names, or leave both empty for auto.", 6, "warning")
+        elseif why == "no_main" then
+            Win:Notify("Fuse", "Main unit Name not found under Equipped / Inventory/Units.", 5, "warning")
+        elseif why == "no_sac" then
+            Win:Notify("Fuse", "A sacrifice Name was not found in Inventory/Units (unequipped only).", 5, "warning")
+        elseif why == "star_mismatch" then
+            Win:Notify("Fuse", "All four units must share the same star tier.", 4, "warning")
+        elseif why == "dup_sac" then
+            Win:Notify("Fuse", "Use three different sacrifice units.", 4, "warning")
+        elseif why == "main_in_sac" then
+            Win:Notify("Fuse", "Main cannot be listed as a sacrifice.", 4, "warning")
+        elseif why == "sac_locked" then
+            Win:Notify("Fuse", "A sacrifice unit is locked.", 4, "warning")
+        elseif why == "validate_fail" or why == "purchase_fail" then
+            Win:Notify("Fuse", "Server rejected fusion (cost, rules, or cooldown).", 5, "warning")
         else
-            Win:Notify("Fuse", "No valid fuse (stock, coins, crystals, or filters).", 4, "warning")
+            Win:Notify("Fuse", "No valid auto fuse (stock, coins, crystals, or filters).", 4, "warning")
         end
     end)
 end)
@@ -2719,6 +3545,8 @@ fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile i
                     minStars = saved.fuseMinStars,
                     maxStars = saved.fuseMaxStars,
                     maxFodderLevel = saved.fuseMaxFodderLevel,
+                    fuseMainUnitId = saved.fuseMainUnitId,
+                    fuseSacrificeIds = saved.fuseSacrificeIds,
                 }
                 if getgenv and type(getgenv().BonusChestFuseMinStars) == "number" then
                     o.minStars = getgenv().BonusChestFuseMinStars
@@ -2734,6 +3562,23 @@ fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile i
                     o.maxFodderLevel = getgenv().BonusChestFuseMaxFodderLevel
                 elseif fuseFodderMaxInputRef then
                     o.maxFodderLevel = tonumber(fuseFodderMaxInputRef.Get()) or o.maxFodderLevel
+                end
+                if getgenv and type(getgenv().BonusChestFuseMainUnitId) == "string" then
+                    o.fuseMainUnitId = getgenv().BonusChestFuseMainUnitId
+                elseif fuseMainUnitDropdownRef then
+                    local _, v = fuseMainUnitDropdownRef.Get()
+                    o.fuseMainUnitId = type(v) == "string" and v or o.fuseMainUnitId
+                end
+                if getgenv and type(getgenv().BonusChestFuseSacrificeIds) == "string" then
+                    o.fuseSacrificeIds = getgenv().BonusChestFuseSacrificeIds
+                elseif fuseSac1DropdownRef and fuseSac2DropdownRef and fuseSac3DropdownRef then
+                    local _, a = fuseSac1DropdownRef.Get()
+                    local _, b = fuseSac2DropdownRef.Get()
+                    local _, c = fuseSac3DropdownRef.Get()
+                    a = type(a) == "string" and a or ""
+                    b = type(b) == "string" and b or ""
+                    c = type(c) == "string" and c or ""
+                    o.fuseSacrificeIds = (#a + #b + #c > 0) and (a .. "," .. b .. "," .. c) or ""
                 end
                 local ok, why = tryAutoFuseOnce(o)
                 if ok then
@@ -2917,11 +3762,17 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
                         lastShopHintTime = t
                         Win:Status("Shop: set filter (* or ItemName list) to auto-buy")
                     end
-                elseif why == "no_remote" or why == "no_module" or why == "no_currency" then
+                elseif why == "no_remote" or why == "no_module" then
                     local t = os.clock()
                     if t - lastShopHintTime > 10 then
                         lastShopHintTime = t
-                        Win:Status("Shop: RotatingShops / Currency not ready")
+                        Win:Status("Shop: RotatingShops module or BuyItem remote missing")
+                    end
+                elseif why == "no_items" then
+                    local t = os.clock()
+                    if t - lastShopHintTime > 10 then
+                        lastShopHintTime = t
+                        Win:Status("Shop: no item list — wrong shop key or API changed")
                     end
                 end
                 task.wait(2)
@@ -2935,17 +3786,27 @@ end)
 
 local TRoll = Win:Tab("🎲", "Rerolls")
 TRoll:Section("Stat reroll")
-TRoll:Label("UnitUpgrades.BuyStatReroll + RerollAction. Each roll must end with UseNew or KeepCurrent (game rule).")
+TRoll:Label("UnitUpgrades.BuyStatReroll + RerollAction. Pick unit below (display names) or Auto — Refresh if list is empty.")
 
-statRerollUnitInputRef = TRoll:Input(
-    "Unit name",
-    "Substring match; empty = highest level equipped, else inventory",
-    "",
-    saved.statRerollUnitName or "",
-    function()
-        persistAll()
+do
+    local suOpts = buildStatTraitUnitOptions()
+    statRerollUnitDropdownRef = TRoll:Dropdown(
+        "Unit (stat reroll)",
+        "Profile Equipped + Inventory · top = Auto",
+        suOpts,
+        dropdownIndexForSavedValue(suOpts, saved.statRerollUnitName or ""),
+        function()
+            persistAll()
+        end
+    )
+end
+
+TRoll:Button("🔄", "Refresh unit lists", "Reload Equipped + Inventory for stat/trait/fuse dropdowns", nil, function()
+    if refreshProfileUnitDropdowns then
+        pcall(refreshProfileUnitDropdowns)
     end
-)
+    Win:Status("Unit lists refreshed")
+end)
 
 statRerollModeDropdownRef = TRoll:Dropdown(
     "Policy",
@@ -2998,7 +3859,15 @@ TRoll:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent pe
         local _, mode = statRerollModeDropdownRef.Get()
         local modeStr = (mode == "better" and "better") or "always"
         local ok, why = tryStatRerollOnce({
-            unitNameFilter = statRerollUnitInputRef.Get(),
+            unitNameFilter = (function()
+                if statRerollUnitDropdownRef then
+                    local _, v = statRerollUnitDropdownRef.Get()
+                    if type(v) == "string" then
+                        return v
+                    end
+                end
+                return ""
+            end)(),
             lockAtk = statRerollLockAtkToggleRef.Get(),
             lockHp = statRerollLockHpToggleRef.Get(),
             lockCd = statRerollLockCdToggleRef.Get(),
@@ -3010,7 +3879,7 @@ TRoll:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent pe
         elseif why == "no_unit" then
             Win:Notify("Stat reroll", "No unit in Profile (equipped / inventory).", 4, "warning")
         elseif why == "no_match" then
-            Win:Notify("Stat reroll", "No unit matches name filter.", 4, "warning")
+            Win:Notify("Stat reroll", "No unit — pick from dropdown or Refresh lists (display names).", 5, "warning")
         elseif why == "all_locked" then
             Win:Notify("Stat reroll", "Unlock at least one stat.", 4, "warning")
         elseif why == "buy_failed" then
@@ -3042,7 +3911,15 @@ statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls 
                 local _, mode = statRerollModeDropdownRef.Get()
                 local modeStr = (mode == "better" and "better") or "always"
                 local ok, why = tryStatRerollOnce({
-                    unitNameFilter = statRerollUnitInputRef.Get(),
+                    unitNameFilter = (function()
+                        if statRerollUnitDropdownRef then
+                            local _, v = statRerollUnitDropdownRef.Get()
+                            if type(v) == "string" then
+                                return v
+                            end
+                        end
+                        return ""
+                    end)(),
                     lockAtk = statRerollLockAtkToggleRef.Get(),
                     lockHp = statRerollLockHpToggleRef.Get(),
                     lockCd = statRerollLockCdToggleRef.Get(),
@@ -3071,17 +3948,20 @@ statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls 
 end)
 
 TRoll:Section("Trait reroll")
-TRoll:Label("UnitUpgrades.BuyTraitReroll + TraitRerollAction (or RerollAction). Matches in-game REROLL TRAITS flow.")
+TRoll:Label("UnitUpgrades.BuyTraitReroll + TraitRerollAction (or RerollAction). Same unit dropdown pattern as stat reroll.")
 
-traitRerollUnitInputRef = TRoll:Input(
-    "Unit name",
-    "Same rules as stat reroll · substring; empty = highest level equipped / inventory",
-    "",
-    saved.traitRerollUnitName or "",
-    function()
-        persistAll()
-    end
-)
+do
+    local tuOpts = buildStatTraitUnitOptions()
+    traitRerollUnitDropdownRef = TRoll:Dropdown(
+        "Unit (trait reroll)",
+        "Same list as stat reroll · Refresh on Units or here",
+        tuOpts,
+        dropdownIndexForSavedValue(tuOpts, saved.traitRerollUnitName or ""),
+        function()
+            persistAll()
+        end
+    )
+end
 
 traitRerollGoalsInputRef = TRoll:Input(
     "Goal traits (comma)",
@@ -3140,7 +4020,15 @@ TRoll:Button("🧬", "Reroll trait once", "BuyTraitReroll then UseNew or KeepCur
         local _, mode = traitRerollModeDropdownRef.Get()
         local modeStr = (mode == "always_apply" and "always_apply") or "until_goal"
         local ok, why = tryTraitRerollOnce({
-            unitNameFilter = traitRerollUnitInputRef.Get(),
+            unitNameFilter = (function()
+                if traitRerollUnitDropdownRef then
+                    local _, v = traitRerollUnitDropdownRef.Get()
+                    if type(v) == "string" then
+                        return v
+                    end
+                end
+                return ""
+            end)(),
             goalCsv = traitRerollGoalsInputRef.Get(),
             mode = modeStr,
             skipAnim = traitRerollSkipAnimToggleRef.Get(),
@@ -3150,7 +4038,7 @@ TRoll:Button("🧬", "Reroll trait once", "BuyTraitReroll then UseNew or KeepCur
         elseif why == "no_unit" then
             Win:Notify("Trait reroll", "No unit in Profile.", 4, "warning")
         elseif why == "no_match" then
-            Win:Notify("Trait reroll", "No unit matches name filter.", 4, "warning")
+            Win:Notify("Trait reroll", "No unit — pick from dropdown or Refresh lists.", 5, "warning")
         elseif why == "no_goals" then
             Win:Notify("Trait reroll", "Add goal traits or switch to “always apply”.", 5, "warning")
         elseif why == "already_goal" then
@@ -3197,7 +4085,15 @@ traitRerollToggleRef = TRoll:Toggle("Auto trait reroll", "Until goal: stops when
                 local _, mode = traitRerollModeDropdownRef.Get()
                 local modeStr = (mode == "always_apply" and "always_apply") or "until_goal"
                 local ok, why = tryTraitRerollOnce({
-                    unitNameFilter = traitRerollUnitInputRef.Get(),
+                    unitNameFilter = (function()
+                        if traitRerollUnitDropdownRef then
+                            local _, v = traitRerollUnitDropdownRef.Get()
+                            if type(v) == "string" then
+                                return v
+                            end
+                        end
+                        return ""
+                    end)(),
                     goalCsv = traitRerollGoalsInputRef.Get(),
                     mode = modeStr,
                     skipAnim = traitRerollSkipAnimToggleRef and traitRerollSkipAnimToggleRef.Get(),
@@ -3229,9 +4125,39 @@ traitRerollToggleRef = TRoll:Toggle("Auto trait reroll", "Until goal: stops when
     persistAll()
 end)
 
+refreshProfileUnitDropdowns = function()
+    local statOpts = buildStatTraitUnitOptions()
+    if statRerollUnitDropdownRef and statRerollUnitDropdownRef.Refresh then
+        local _, v = statRerollUnitDropdownRef.Get()
+        statRerollUnitDropdownRef.Refresh(statOpts, v)
+    end
+    if traitRerollUnitDropdownRef and traitRerollUnitDropdownRef.Refresh then
+        local _, v = traitRerollUnitDropdownRef.Get()
+        traitRerollUnitDropdownRef.Refresh(statOpts, v)
+    end
+    local mainOpts = buildStatTraitUnitOptions()
+    local sacOpts = buildFuseSacrificeSlotOptions()
+    if fuseMainUnitDropdownRef and fuseMainUnitDropdownRef.Refresh then
+        local _, v = fuseMainUnitDropdownRef.Get()
+        fuseMainUnitDropdownRef.Refresh(mainOpts, v)
+    end
+    if fuseSac1DropdownRef and fuseSac1DropdownRef.Refresh then
+        local _, v = fuseSac1DropdownRef.Get()
+        fuseSac1DropdownRef.Refresh(sacOpts, v)
+    end
+    if fuseSac2DropdownRef and fuseSac2DropdownRef.Refresh then
+        local _, v = fuseSac2DropdownRef.Get()
+        fuseSac2DropdownRef.Refresh(sacOpts, v)
+    end
+    if fuseSac3DropdownRef and fuseSac3DropdownRef.Refresh then
+        local _, v = fuseSac3DropdownRef.Get()
+        fuseSac3DropdownRef.Refresh(sacOpts, v)
+    end
+end
+
 local TRewards = Win:Tab("✨", "Rewards")
 TRewards:Section("Quests (Achievements & Daily)")
-TRewards:Label("Tries Systems.Quests / Achievements / Quest modules + QuestEvent. Server ignores unready claims.")
+TRewards:Label("QuestEvent + Profile/Data quest ids (Claim per id) · bulk ClaimAll* · server ignores invalid.")
 
 claimQuestsIntervalInputRef = TRewards:Input(
     "Interval (sec)",
@@ -3496,6 +4422,10 @@ task.defer(function()
     if playerTabRefs.godMode and type(playerTabRefs.godMode.Set) == "function" then
         playerTabRefs.godMode.Set(saved.playerGodMode == true)
     end
+    task.spawn(function()
+        task.wait(1.5)
+        pcall(refreshProfileUnitDropdowns)
+    end)
 end)
 
 pcall(function()
