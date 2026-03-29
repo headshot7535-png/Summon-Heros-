@@ -1,10 +1,11 @@
 --[[
   Summon Heroes — FULL CLEANED automation (2026). One NexusLib window (Win:Window{ title, width, height }).
+  Re-execute: cleanupOldNexusLibGuiBeforeWindow() removes prior NexusLib_* ScreenGuis; loadConfig() runs each execution; task.defer applies every saved toggle (true/false). Do not destroy CoreGui by name — it breaks Roblox UI.
   Loop cancellation: each auto feature bumps a generation counter so the previous task.spawn loop exits (no stuck/overlapping loops).
     • G.loop — bonus chests auto   • G.revive — auto revive   • G.ready — map ready
     • G.story / G.dungeon — story & dungeon auto-start   • stageVoteLoopId — round-end Next / Retry vote
     • G.fuse / G.summon / G.shop / G.statReroll / G.traitReroll / G.questClaim — units, shop, rerolls, claims
-  Toggles call persistAll(); saved toggles are restored via Toggle:Set(true) in task.defer (do not paste a second copy of this script).
+  Toggles call persistAll(); saved toggles are restored via Toggle:Set(savedValue) in task.defer (do not paste a second copy of this script).
 
   Bonus chest auto: optional lobby-only when workspace:GetAttribute("RoundStarted") == true (disable with getgenv().BonusChestChestsLobbyOnly = false).
   isInLobby() == (RoundStarted ~= true); used for chest gating and available for other checks.
@@ -3644,10 +3645,32 @@ local function getBonusChestWorldCFrame(inst)
     return nil
 end
 
+--- Before creating a new NexusLib window: remove prior NexusLib_* ScreenGuis (re-execute / double-load). NexusLib:Window also destroys same title, but this clears any title change or orphan. Bumps NexusLib global gens so presence/chat loops exit.
+local function cleanupOldNexusLibGuiBeforeWindow()
+    pcall(function()
+        _G.NexusLib_PresenceGen = (_G.NexusLib_PresenceGen or 0) + 1
+    end)
+    pcall(function()
+        _G.NexusLib_ChatGen = (_G.NexusLib_ChatGen or 0) + 1
+    end)
+    local pg = LP and LP:FindFirstChild("PlayerGui")
+    if pg then
+        for _, ch in ipairs(pg:GetChildren()) do
+            if ch:IsA("ScreenGui") and string.sub(ch.Name, 1, 9) == "NexusLib_" then
+                pcall(function()
+                    ch:Destroy()
+                end)
+            end
+        end
+    end
+    task.wait(0.15)
+end
+
 -- ── NexusLib UI: IIFE — locals here are not in the script chunk (Luau 200-register limit per function) ──
 local Win
 local persistAll
 ;(function()
+cleanupOldNexusLibGuiBeforeWindow()
 Win = NexusLib:Window({ title = "Summon Heroes", width = 400, height = 760 })
 
 local THome = Win:Tab("🏠", "Home")
@@ -5293,65 +5316,63 @@ local function wirePlayerTab()
 end
 wirePlayerTab()
 
--- Restore toggles from saved config (Toggle does not run cb on first paint)
+-- Restore toggles from saved config (Toggle:Set fires callback — starts/stops loops to match JSON)
 task.defer(function()
     hookSummonPackOpenedAutoSell()
     setAutoSellRarityInGame(3, saved.autoSellRare)
     setAutoSellRarityInGame(4, saved.autoSellEpic)
     setAutoSellRarityInGame(5, saved.autoSellLegendary)
     setAutoSellRarityInGame(6, saved.autoSellMythic)
-    if saved.autoCollect and autoToggleRef then
-        task.spawn(function()
-            task.wait(2)
-            if autoToggleRef then
-                autoToggleRef.Set(true)
-            end
-        end)
+    if autoToggleRef then
+        autoToggleRef.Set(saved.autoCollect == true)
     end
-    if saved.autoRevive and reviveToggleRef then
-        reviveToggleRef.Set(true)
+    if reviveToggleRef then
+        reviveToggleRef.Set(saved.autoRevive == true)
     end
-    if saved.autoPlayNextMap and nextStageToggleRef then
-        nextStageToggleRef.Set(true)
+    if readyToggleRef then
+        readyToggleRef.Set(saved.autoReadyUp == true)
     end
-    if saved.autoRetryStage and retryStageToggleRef then
-        retryStageToggleRef.Set(true)
+    if nextStageToggleRef then
+        nextStageToggleRef.Set(saved.autoPlayNextMap == true)
     end
-    if saved.autoReadyUp and readyToggleRef then
-        readyToggleRef.Set(true)
+    if retryStageToggleRef then
+        retryStageToggleRef.Set(saved.autoRetryStage == true)
     end
-    if saved.autoRedeemCodes and redeemToggleRef then
-        redeemToggleRef.Set(true)
+    if storyStartToggleRef then
+        storyStartToggleRef.Set(saved.autoStartStory == true)
     end
-    if saved.autoStartStory and storyStartToggleRef then
-        storyStartToggleRef.Set(true)
+    if dungeonStartToggleRef then
+        dungeonStartToggleRef.Set(saved.autoStartDungeon == true)
     end
-    if saved.autoStartDungeon and dungeonStartToggleRef then
-        dungeonStartToggleRef.Set(true)
+    if fuseToggleRef then
+        fuseToggleRef.Set(saved.autoFuseUnits == true)
     end
-    if saved.autoBuyRotatingShop and rotatingShopToggleRef then
-        rotatingShopToggleRef.Set(true)
+    if summonToggleRef then
+        summonToggleRef.Set(saved.autoSummon == true)
     end
-    if saved.autoFuseUnits and fuseToggleRef then
-        fuseToggleRef.Set(true)
+    if rotatingShopToggleRef then
+        rotatingShopToggleRef.Set(saved.autoBuyRotatingShop == true)
     end
-    if saved.autoSummon and summonToggleRef then
-        summonToggleRef.Set(true)
+    if statRerollToggleRef then
+        statRerollToggleRef.Set(saved.autoStatReroll == true)
     end
-    if saved.autoStatReroll and statRerollToggleRef then
-        statRerollToggleRef.Set(true)
+    if traitRerollToggleRef then
+        traitRerollToggleRef.Set(saved.autoTraitReroll == true)
     end
-    if saved.autoTraitReroll and traitRerollToggleRef then
-        traitRerollToggleRef.Set(true)
+    if traitRerollSkipAnimToggleRef then
+        trySetSkipTraitRerollAnim(saved.traitRerollSkipAnim == true)
     end
-    if saved.traitRerollSkipAnim and traitRerollSkipAnimToggleRef then
-        trySetSkipTraitRerollAnim(true)
+    if redeemToggleRef then
+        redeemToggleRef.Set(saved.autoRedeemCodes == true)
     end
-    if saved.autoClaimAchievements and claimAchievementsToggleRef then
-        claimAchievementsToggleRef.Set(true)
+    if claimAchievementsToggleRef then
+        claimAchievementsToggleRef.Set(saved.autoClaimAchievements == true)
     end
-    if saved.autoClaimDaily and claimDailyToggleRef then
-        claimDailyToggleRef.Set(true)
+    if claimDailyToggleRef then
+        claimDailyToggleRef.Set(saved.autoClaimDaily == true)
+    end
+    if queueToggleRef then
+        queueToggleRef.Set(saved.queueOnTeleport ~= false)
     end
     if (saved.autoClaimAchievements or saved.autoClaimDaily) then
         task.defer(restartQuestAutoClaimLoop)
@@ -5375,6 +5396,8 @@ task.defer(function()
         task.wait(1.5)
         pcall(refreshProfileUnitDropdowns)
     end)
+    Win:Status(("Summon Heroes · latest settings from %s (re-exec)"):format(CONFIG_FILE))
+    print(("[AutoBonusChests] Re-exec OK · NexusLib_* cleaned · toggles synced · %s"):format(CONFIG_FILE))
 end)
 
 pcall(function()
