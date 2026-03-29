@@ -3,7 +3,7 @@
   Game: parts tagged "BonusChestPart", ProximityPrompt under Attachment (BonusChests system).
 
   NexusLib: optional getgenv().NexusLibPath, then readfile("NexusLib.lua"), then GitHub URLs.
-  Chests: script teleports in range; you complete each ProximityPrompt (E / hold) before the next.
+  Chests: TP in range, then executor fireproximityprompt (HoldDuration→0); falls back to E if no executor API.
 
   Re-run after server / lobby: uses queue_on_teleport (TeleportService). Optional:
     getgenv().BonusChestScriptUrl = "https://..."  -- override script URL
@@ -160,6 +160,36 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LP = Players.LocalPlayer
 
+--- True if this GuiObject and ancestors are visible and owning ScreenGui (if any) is enabled.
+local function guiObjectShownOnScreen(inst)
+    if not inst or not inst:IsA("GuiObject") or not inst.Visible then
+        return false
+    end
+    local p = inst
+    while p do
+        if p:IsA("GuiObject") and not p.Visible then
+            return false
+        end
+        if p:IsA("ScreenGui") and not p.Enabled then
+            return false
+        end
+        p = p.Parent
+    end
+    return true
+end
+
+local function playerGuiDescendantShown(name)
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then
+        return false
+    end
+    local inst = pg:FindFirstChild(name, true)
+    if not inst or not inst:IsA("GuiObject") then
+        return false
+    end
+    return guiObjectShownOnScreen(inst)
+end
+
 local function getTryReviveRemote()
     local systems = ReplicatedStorage:FindFirstChild("Systems")
     local waves = systems and systems:FindFirstChild("Waves")
@@ -172,7 +202,42 @@ local function getEquippedFolder()
     return profile and profile:FindFirstChild("Equipped")
 end
 
---- Fires TryReviveUnit for each slot under Profile.Equipped (e.g. DemonHunter). Server ignores invalid / alive units.
+local function unitModelForEquippedSlot(slot)
+    local units = workspace:FindFirstChild("Units")
+    if not units then
+        return nil
+    end
+    for _, m in ipairs(units:GetChildren()) do
+        if m:IsA("Model") and m:GetAttribute("OwnerName") == LP.Name then
+            local ref = m:FindFirstChild("DataRef")
+            if ref and ref:IsA("ObjectValue") and ref.Value == slot then
+                return m
+            end
+        end
+    end
+    return nil
+end
+
+--- Matches server revive rule: only when no live spawned unit for that Equipped folder (DataRef + Humanoid.Health).
+local function isEquippedSlotDeadForRevive(slot)
+    if not slot or not slot.Parent then
+        return false
+    end
+    local model = unitModelForEquippedSlot(slot)
+    if not model then
+        if workspace:GetAttribute("RoundStarted") ~= true then
+            return false
+        end
+        return true
+    end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum then
+        return true
+    end
+    return hum.Health <= 0
+end
+
+--- Fires TryReviveUnit only for equipped slots whose unit is dead or not spawned (during an active round).
 local function fireReviveAllSlots()
     local ev = getTryReviveRemote()
     if not ev or not ev:IsA("RemoteEvent") then
@@ -182,12 +247,16 @@ local function fireReviveAllSlots()
     if not eq then
         return false
     end
+    local any = false
     for _, slot in ipairs(eq:GetChildren()) do
-        pcall(function()
-            ev:FireServer(slot)
-        end)
+        if isEquippedSlotDeadForRevive(slot) then
+            any = true
+            pcall(function()
+                ev:FireServer(slot)
+            end)
+        end
     end
-    return true
+    return any
 end
 
 local function getVoteRemote()
@@ -201,12 +270,7 @@ local function getVoteRemote()
 end
 
 local function roundEndGuiButtonVisible(buttonName)
-    local pg = LP:FindFirstChild("PlayerGui")
-    if not pg then
-        return false
-    end
-    local inst = pg:FindFirstChild(buttonName, true)
-    return inst ~= nil and inst:IsA("GuiObject") and inst.Visible
+    return playerGuiDescendantShown(buttonName)
 end
 
 --- Same as RoundEnd UI: Voting:Vote after intermission (Next = next stage/map, Retry = restart stage).
@@ -220,23 +284,12 @@ local function getWavesReadyRemote()
     return nil
 end
 
---- True when map wants a ready press: intermission or Ready HUD visible, and we are not already Ready.
+--- Only when the map Ready control is actually shown (not just intermission).
 local function mapReadyWanted()
     if LP:GetAttribute("Ready") == true then
         return false
     end
-    local waveInfo = ReplicatedStorage:FindFirstChild("WaveInfo")
-    if waveInfo and waveInfo:GetAttribute("Intermission") == true then
-        return true
-    end
-    local pg = LP:FindFirstChild("PlayerGui")
-    if pg then
-        local btn = pg:FindFirstChild("ReadyButton", true)
-        if btn and btn:IsA("GuiObject") and btn.Visible then
-            return true
-        end
-    end
-    return false
+    return playerGuiDescendantShown("ReadyButton")
 end
 
 local function fireMapReady()
@@ -261,15 +314,15 @@ local function fireRoundEndVote(wantNext, wantRetry)
     if not ev then
         return
     end
-    local nextVis = roundEndGuiButtonVisible("NextStageButton")
-    local restartVis = roundEndGuiButtonVisible("RestartButton")
-    if wantNext and nextVis then
+    local nextVis = wantNext and roundEndGuiButtonVisible("NextStageButton")
+    local restartVis = wantRetry and roundEndGuiButtonVisible("RestartButton")
+    if nextVis then
         pcall(function()
             ev:FireServer("Next")
         end)
         return
     end
-    if wantRetry and restartVis then
+    if restartVis then
         pcall(function()
             ev:FireServer("Retry")
         end)
@@ -288,8 +341,37 @@ local function findChestPrompt(part)
     return part:FindFirstChildWhichIsA("ProximityPrompt", true)
 end
 
---- Wait until the local player finishes the prompt (hold E / interact). Does not auto-fire the prompt.
-local CHEST_WAIT_SEC = 300
+local _warnedNoFirePrompt
+local function fireProximityPromptExec(prompt)
+    if not prompt or not prompt:IsA("ProximityPrompt") then
+        return false
+    end
+    local hold = prompt.HoldDuration
+    pcall(function()
+        prompt.HoldDuration = 0
+    end)
+    local ok = false
+    if typeof(fireproximityprompt) == "function" then
+        ok = select(1, pcall(fireproximityprompt, prompt))
+    end
+    if not ok and getgenv then
+        local g = getgenv()
+        if g and typeof(g.fireproximityprompt) == "function" then
+            ok = select(1, pcall(g.fireproximityprompt, prompt))
+        end
+    end
+    pcall(function()
+        prompt.HoldDuration = hold
+    end)
+    if not ok and not _warnedNoFirePrompt then
+        _warnedNoFirePrompt = true
+        warn("[AutoBonusChests] fireproximityprompt missing — using E fallback.")
+    end
+    return ok
+end
+
+--- Wait until the local player finishes the prompt (hold E / interact). Fallback if executor cannot fire.
+local CHEST_WAIT_SEC = 60
 
 local function waitForChestInteract(prompt, timeoutSec)
     timeoutSec = timeoutSec or CHEST_WAIT_SEC
@@ -353,17 +435,22 @@ local function collectAllChests(progressCb)
         local prompt = findChestPrompt(part)
         if prompt and prompt.Parent and prompt.Enabled then
             pcall(moveToPrompt, root, part, prompt)
-            task.wait(0.1)
+            task.wait(0.12)
             if progressCb then
-                progressCb(i, n, ("Chest %d/%d — press E to open"):format(i, n))
+                progressCb(i, n, ("Chest %d/%d — fireproximityprompt…"):format(i, n))
             end
-            local finished = waitForChestInteract(prompt, CHEST_WAIT_SEC)
-            if finished then
-                opened = opened + 1
-                task.wait(0.2)
-            else
-                return opened, "Timed out waiting for E on chest"
+            fireProximityPromptExec(prompt)
+            task.wait(0.7)
+            if prompt.Enabled then
+                if progressCb then
+                    progressCb(i, n, ("Chest %d/%d — press E or waiting…"):format(i, n))
+                end
+                if not waitForChestInteract(prompt, CHEST_WAIT_SEC) then
+                    return opened, "Timed out on chest (try executor fireproximityprompt)"
+                end
             end
+            opened = opened + 1
+            task.wait(0.2)
         end
     end
 
@@ -375,7 +462,7 @@ local Win = NexusLib:Window({ title = "Bonus Chests", width = 360, height = 620 
 
 local T = Win:Tab("📦", "Chests")
 T:Section("Map chests")
-T:Label("BonusChestPart · moves to each chest; you must press E (hold) before the next.")
+T:Label("BonusChestPart · TP + fireproximityprompt; E-wait only if prompt stays enabled.")
 
 local hint = T:Label("Ready.")
 
@@ -383,7 +470,7 @@ local function setHint(text)
     hint.Set(text)
 end
 
-T:Button("🎯", "Collect all now", "TP to each chest in order — press E to open before next", nil, function()
+T:Button("🎯", "Collect all now", "TP + fireproximityprompt (executor); E fallback", nil, function()
     Win:Status("Opening chests…")
     setHint("Running…")
     task.spawn(function()
@@ -430,7 +517,7 @@ local stageGen = 0
 
 local refreshStageWatcher
 
-autoToggleRef = T:Toggle("Auto collect", "Full route every 2s after E on each chest", saved.autoCollect, function(on)
+autoToggleRef = T:Toggle("Auto collect", "Every 2s: route with fireproximityprompt + chests", saved.autoCollect, function(on)
     loopGen = loopGen + 1
     local myGen = loopGen
     if on then
@@ -456,7 +543,7 @@ autoToggleRef = T:Toggle("Auto collect", "Full route every 2s after E on each ch
 end)
 
 T:Section("Revive")
-T:Label("Waves.TryReviveUnit · all Profile.Equipped slots (uses your revives).")
+T:Label("TryReviveUnit only if slot has no live unit (workspace.Units + DataRef) or HP ≤ 0.")
 
 reviveToggleRef = T:Toggle("Auto revive", "Fire revive on equipped slots every 1.5s", saved.autoRevive, function(on)
     reviveGen = reviveGen + 1
@@ -464,8 +551,10 @@ reviveToggleRef = T:Toggle("Auto revive", "Fire revive on equipped slots every 1
     if on then
         task.spawn(function()
             while myR == reviveGen do
-                if not fireReviveAllSlots() then
+                if not getTryReviveRemote() or not getEquippedFolder() then
                     Win:Status("Revive: wait for Profile / Waves")
+                else
+                    fireReviveAllSlots()
                 end
                 task.wait(1.5)
             end
@@ -475,7 +564,7 @@ reviveToggleRef = T:Toggle("Auto revive", "Fire revive on equipped slots every 1
 end)
 
 T:Section("Map ready")
-T:Label("Waves.Ready:FireServer() when intermission or Ready button shows (not already Ready).")
+T:Label("Waves.Ready only when ReadyButton is on-screen (ScreenGui enabled + ancestor visible).")
 
 readyToggleRef = T:Toggle("Auto ready up", "Checks ~1s · same as Ready in map HUD", saved.autoReadyUp, function(on)
     readyGen = readyGen + 1
@@ -492,7 +581,7 @@ readyToggleRef = T:Toggle("Auto ready up", "Checks ~1s · same as Ready in map H
 end)
 
 T:Section("Stage vote")
-T:Label("Round-end: Systems.Voting.Vote — Next if Play Next visible, else Retry if Restart visible.")
+T:Label("Vote only if that button is shown: Next vs Restart (each toggle gated separately).")
 
 nextStageToggleRef = T:Toggle("Auto play next map / stage", "Votes Next when the round-end screen offers it", saved.autoPlayNextMap, function()
     persistAll()
