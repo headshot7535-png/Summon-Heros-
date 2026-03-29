@@ -3980,7 +3980,6 @@ local G = {
     loop = 0,
     revive = 0,
     ready = 0,
-    stage = 0,
     redeem = 0,
     story = 0,
     dungeon = 0,
@@ -3998,8 +3997,6 @@ local G = {
     lastShopHint = 0,
     lastFuseHint = 0,
 }
-
-local refreshStageWatcher
 
 -- ==================== AUTO BONUS CHESTS ====================
 -- G.loop acts as generation id (same idea as chestLoopId): incrementing kills the previous loop.
@@ -4259,21 +4256,66 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
 end)
 
 TBattle:Section("Stage vote")
-TBattle:Label("Votes ~0.35s: names + “Next Stage”/“Retry Stage” text, FireServer + Activate; timer fallback.")
+TBattle:Label("Auto votes Next Stage or Retry Stage when round ends")
 
-nextStageToggleRef = TBattle:Toggle("Auto play next map / stage", "Votes Next when the round-end screen offers it", saved.autoPlayNextMap, function()
-    persistAll()
-    if refreshStageWatcher then
-        refreshStageWatcher()
-    end
-end)
+-- ==================== CLEAN LOOP SYSTEM FOR STAGE VOTES ====================
+local stageVoteLoopId = 0
 
-retryStageToggleRef = TBattle:Toggle("Auto retry stage", "Votes Retry when Restart is shown (e.g. after a loss)", saved.autoRetryStage, function()
-    persistAll()
-    if refreshStageWatcher then
-        refreshStageWatcher()
+local function startStageVoteLoop()
+    stageVoteLoopId = stageVoteLoopId + 1
+    local thisId = stageVoteLoopId
+    Win:Status("Stage Auto-Vote → ENABLED")
+    task.spawn(function()
+        while thisId == stageVoteLoopId do
+            local timerActive = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
+            local uiNext = roundEndNextUiVisible()
+            local uiRetry = roundEndRetryUiVisible()
+            if timerActive or uiNext or uiRetry then
+                local wantNext = nextStageToggleRef and nextStageToggleRef.Get()
+                local wantRetry = retryStageToggleRef and retryStageToggleRef.Get()
+                if wantNext or wantRetry then
+                    fireRoundEndVote(wantNext, wantRetry)
+                    Win:Status(wantNext and "✅ Voted Next Stage" or "✅ Voted Retry Stage")
+                    task.wait(1.2)
+                end
+            end
+            task.wait(0.35)
+        end
+        Win:Status("Stage Auto-Vote → DISABLED")
+    end)
+end
+
+nextStageToggleRef = TBattle:Toggle(
+    "Auto play next map / stage",
+    "Votes Next when the round-end screen offers it",
+    saved.autoPlayNextMap,
+    function(state)
+        persistAll()
+        if state or (retryStageToggleRef and retryStageToggleRef.Get()) then
+            startStageVoteLoop()
+        else
+            stageVoteLoopId = stageVoteLoopId + 1
+        end
     end
-end)
+)
+
+retryStageToggleRef = TBattle:Toggle(
+    "Auto retry stage",
+    "Votes Retry when Restart is shown (e.g. after a loss)",
+    saved.autoRetryStage,
+    function(state)
+        persistAll()
+        if state or (nextStageToggleRef and nextStageToggleRef.Get()) then
+            startStageVoteLoop()
+        else
+            stageVoteLoopId = stageVoteLoopId + 1
+        end
+    end
+)
+
+if saved.autoPlayNextMap or saved.autoRetryStage then
+    task.defer(startStageVoteLoop)
+end
 
 -- Separate function scope: nested `do` still shares the outer chunk's 200 locals in Luau.
 local function wireFuseUnitDropdowns(unitsTab)
@@ -5174,35 +5216,6 @@ redeemToggleRef = TRewards:Toggle("Auto redeem codes", "Retry full list every 2 
     end
     persistAll()
 end)
-
-refreshStageWatcher = function()
-    G.stage = G.stage + 1
-    local g = G.stage
-    local function anyStageAuto()
-        return (nextStageToggleRef and nextStageToggleRef.Get())
-            or (retryStageToggleRef and retryStageToggleRef.Get())
-    end
-    if not anyStageAuto() then
-        return
-    end
-    task.spawn(function()
-        while g == G.stage do
-            if not anyStageAuto() then
-                break
-            end
-            local timerOn = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
-            local uiNext = roundEndNextUiVisible()
-            local uiRetry = roundEndRetryUiVisible()
-            if timerOn or uiNext or uiRetry then
-                fireRoundEndVote(
-                    nextStageToggleRef and nextStageToggleRef.Get(),
-                    retryStageToggleRef and retryStageToggleRef.Get()
-                )
-            end
-            task.wait(0.35)
-        end
-    end)
-end
 
 local TSystem = Win:Tab("⚙", "System")
 TSystem:Section("Session")
