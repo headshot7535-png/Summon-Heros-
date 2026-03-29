@@ -3,14 +3,14 @@
   Game: parts tagged "BonusChestPart", ProximityPrompt under Attachment (BonusChests system).
 
   NexusLib: optional getgenv().NexusLibPath, then readfile("NexusLib.lua"), then GitHub URLs.
-  Requires fireproximityprompt (executor).
+  Chests: script teleports in range; you complete each ProximityPrompt (E / hold) before the next.
 
   Re-run after server / lobby: uses queue_on_teleport (TeleportService). Optional:
     getgenv().BonusChestScriptUrl = "https://..."  -- override script URL
     getgenv().BonusChestNoQueue = true             -- skip queue_on_teleport
   Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
 
-  Settings file: BonusChests_config.json (or getgenv().BonusChestConfigPath). Requires writefile/readfile.
+  Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -18,7 +18,14 @@ local CONFIG_FILE = (getgenv and type(getgenv().BonusChestConfigPath) == "string
     or "BonusChests_config.json"
 
 local function loadConfig()
-    local defaults = { autoCollect = false, queueOnTeleport = true }
+    local defaults = {
+        autoCollect = false,
+        queueOnTeleport = true,
+        autoRevive = false,
+        autoPlayNextMap = false,
+        autoRetryStage = false,
+        autoReadyUp = false,
+    }
     if not readfile then
         return defaults
     end
@@ -37,6 +44,18 @@ local function loadConfig()
     end
     if type(data.queueOnTeleport) == "boolean" then
         defaults.queueOnTeleport = data.queueOnTeleport
+    end
+    if type(data.autoRevive) == "boolean" then
+        defaults.autoRevive = data.autoRevive
+    end
+    if type(data.autoPlayNextMap) == "boolean" then
+        defaults.autoPlayNextMap = data.autoPlayNextMap
+    end
+    if type(data.autoRetryStage) == "boolean" then
+        defaults.autoRetryStage = data.autoRetryStage
+    end
+    if type(data.autoReadyUp) == "boolean" then
+        defaults.autoReadyUp = data.autoReadyUp
     end
     return defaults
 end
@@ -138,7 +157,124 @@ end
 
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LP = Players.LocalPlayer
+
+local function getTryReviveRemote()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local waves = systems and systems:FindFirstChild("Waves")
+    return waves and waves:FindFirstChild("TryReviveUnit")
+end
+
+local function getEquippedFolder()
+    local pg = LP:FindFirstChild("PlayerGui")
+    local profile = pg and pg:FindFirstChild("Profile")
+    return profile and profile:FindFirstChild("Equipped")
+end
+
+--- Fires TryReviveUnit for each slot under Profile.Equipped (e.g. DemonHunter). Server ignores invalid / alive units.
+local function fireReviveAllSlots()
+    local ev = getTryReviveRemote()
+    if not ev or not ev:IsA("RemoteEvent") then
+        return false
+    end
+    local eq = getEquippedFolder()
+    if not eq then
+        return false
+    end
+    for _, slot in ipairs(eq:GetChildren()) do
+        pcall(function()
+            ev:FireServer(slot)
+        end)
+    end
+    return true
+end
+
+local function getVoteRemote()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local voting = systems and systems:FindFirstChild("Voting")
+    local ev = voting and voting:FindFirstChild("Vote")
+    if ev and ev:IsA("RemoteEvent") then
+        return ev
+    end
+    return nil
+end
+
+local function roundEndGuiButtonVisible(buttonName)
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then
+        return false
+    end
+    local inst = pg:FindFirstChild(buttonName, true)
+    return inst ~= nil and inst:IsA("GuiObject") and inst.Visible
+end
+
+--- Same as RoundEnd UI: Voting:Vote after intermission (Next = next stage/map, Retry = restart stage).
+local function getWavesReadyRemote()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local waves = systems and systems:FindFirstChild("Waves")
+    local r = waves and waves:FindFirstChild("Ready")
+    if r and r:IsA("RemoteEvent") then
+        return r
+    end
+    return nil
+end
+
+--- True when map wants a ready press: intermission or Ready HUD visible, and we are not already Ready.
+local function mapReadyWanted()
+    if LP:GetAttribute("Ready") == true then
+        return false
+    end
+    local waveInfo = ReplicatedStorage:FindFirstChild("WaveInfo")
+    if waveInfo and waveInfo:GetAttribute("Intermission") == true then
+        return true
+    end
+    local pg = LP:FindFirstChild("PlayerGui")
+    if pg then
+        local btn = pg:FindFirstChild("ReadyButton", true)
+        if btn and btn:IsA("GuiObject") and btn.Visible then
+            return true
+        end
+    end
+    return false
+end
+
+local function fireMapReady()
+    if not mapReadyWanted() then
+        return false
+    end
+    local ev = getWavesReadyRemote()
+    if not ev then
+        return false
+    end
+    pcall(function()
+        ev:FireServer()
+    end)
+    return true
+end
+
+local function fireRoundEndVote(wantNext, wantRetry)
+    if not wantNext and not wantRetry then
+        return
+    end
+    local ev = getVoteRemote()
+    if not ev then
+        return
+    end
+    local nextVis = roundEndGuiButtonVisible("NextStageButton")
+    local restartVis = roundEndGuiButtonVisible("RestartButton")
+    if wantNext and nextVis then
+        pcall(function()
+            ev:FireServer("Next")
+        end)
+        return
+    end
+    if wantRetry and restartVis then
+        pcall(function()
+            ev:FireServer("Retry")
+        end)
+    end
+end
 
 local function getRoot()
     local ch = LP.Character
@@ -152,26 +288,35 @@ local function findChestPrompt(part)
     return part:FindFirstChildWhichIsA("ProximityPrompt", true)
 end
 
-local _warnedNoFire
-local function firePrompt(prompt)
-    if not prompt or not prompt:IsA("ProximityPrompt") then
+--- Wait until the local player finishes the prompt (hold E / interact). Does not auto-fire the prompt.
+local CHEST_WAIT_SEC = 300
+
+local function waitForChestInteract(prompt, timeoutSec)
+    timeoutSec = timeoutSec or CHEST_WAIT_SEC
+    if not prompt or not prompt:IsA("ProximityPrompt") or not prompt.Parent then
         return false
     end
-    local fired = false
-    if typeof(fireproximityprompt) == "function" then
-        fired = pcall(fireproximityprompt, prompt)
+    if not prompt.Enabled then
+        return true
     end
-    if not fired and getgenv then
-        local g = getgenv()
-        if g and typeof(g.fireproximityprompt) == "function" then
-            fired = pcall(g.fireproximityprompt, prompt)
+    local done = false
+    local c1 = prompt.Triggered:Connect(function(player)
+        if player == LP then
+            done = true
         end
+    end)
+    local c2 = prompt:GetPropertyChangedSignal("Enabled"):Connect(function()
+        if not prompt.Enabled then
+            done = true
+        end
+    end)
+    local t0 = os.clock()
+    while not done and prompt.Parent and (os.clock() - t0) < timeoutSec do
+        task.wait(0.05)
     end
-    if not fired and not _warnedNoFire then
-        _warnedNoFire = true
-        warn("[AutoBonusChests] fireproximityprompt not found.")
-    end
-    return fired
+    pcall(function() c1:Disconnect() end)
+    pcall(function() c2:Disconnect() end)
+    return done
 end
 
 local function moveToPrompt(root, part, prompt)
@@ -190,7 +335,8 @@ local function moveToPrompt(root, part, prompt)
     root.CFrame = CFrame.new(pos + offset)
 end
 
-local function collectAllChests()
+--- progressCb(i, total, msg) optional — e.g. update hint while waiting for E.
+local function collectAllChests(progressCb)
     local root = getRoot()
     if not root then
         return 0, "No character"
@@ -202,15 +348,22 @@ local function collectAllChests()
         return (a.Position - root.Position).Magnitude < (b.Position - root.Position).Magnitude
     end)
 
-    for _, part in ipairs(parts) do
+    local n = #parts
+    for i, part in ipairs(parts) do
         local prompt = findChestPrompt(part)
-        if prompt and prompt.Enabled then
+        if prompt and prompt.Parent and prompt.Enabled then
             pcall(moveToPrompt, root, part, prompt)
-            task.wait(0.08)
-            if firePrompt(prompt) then
-                opened = opened + 1
+            task.wait(0.1)
+            if progressCb then
+                progressCb(i, n, ("Chest %d/%d — press E to open"):format(i, n))
             end
-            task.wait(0.35)
+            local finished = waitForChestInteract(prompt, CHEST_WAIT_SEC)
+            if finished then
+                opened = opened + 1
+                task.wait(0.2)
+            else
+                return opened, "Timed out waiting for E on chest"
+            end
         end
     end
 
@@ -218,11 +371,11 @@ local function collectAllChests()
 end
 
 -- ── NexusLib UI ───────────────────────────────────────────────
-local Win = NexusLib:Window({ title = "Bonus Chests", width = 360, height = 420 })
+local Win = NexusLib:Window({ title = "Bonus Chests", width = 360, height = 620 })
 
 local T = Win:Tab("📦", "Chests")
 T:Section("Map chests")
-T:Label("Tags: BonusChestPart · needs executor fireproximityprompt.")
+T:Label("BonusChestPart · moves to each chest; you must press E (hold) before the next.")
 
 local hint = T:Label("Ready.")
 
@@ -230,18 +383,20 @@ local function setHint(text)
     hint.Set(text)
 end
 
-T:Button("🎯", "Collect all now", "Teleport to each chest and open prompts", nil, function()
+T:Button("🎯", "Collect all now", "TP to each chest in order — press E to open before next", nil, function()
     Win:Status("Opening chests…")
     setHint("Running…")
     task.spawn(function()
-        local n, err = collectAllChests()
+        local n, err = collectAllChests(function(_, _, msg)
+            setHint(msg)
+        end)
         if err then
             Win:Status(err)
             setHint(err)
             Win:Notify("Chests", err, 4, "warning")
             return
         end
-        local msg = string.format("Fired %d prompt(s)", n)
+        local msg = string.format("Opened %d chest(s)", n)
         Win:Status(msg)
         setHint(msg)
         Win:Notify("Chests", msg, 3, n > 0 and "success" or "warning")
@@ -250,25 +405,41 @@ end)
 
 T:Section("Automation")
 
-local function persistSettings(autoGet, queueGet)
+local autoToggleRef
+local reviveToggleRef
+local readyToggleRef
+local nextStageToggleRef
+local retryStageToggleRef
+local queueToggleRef
+
+local function persistAll()
     saveConfig({
-        autoCollect = autoGet and autoGet() or false,
-        queueOnTeleport = queueGet and queueGet() or true,
+        autoCollect = autoToggleRef and autoToggleRef.Get() or false,
+        queueOnTeleport = queueToggleRef and queueToggleRef.Get() or true,
+        autoRevive = reviveToggleRef and reviveToggleRef.Get() or false,
+        autoReadyUp = readyToggleRef and readyToggleRef.Get() or false,
+        autoPlayNextMap = nextStageToggleRef and nextStageToggleRef.Get() or false,
+        autoRetryStage = retryStageToggleRef and retryStageToggleRef.Get() or false,
     })
 end
 
 local loopGen = 0
-local autoToggleRef
-local queueToggleRef
+local reviveGen = 0
+local readyGen = 0
+local stageGen = 0
 
-autoToggleRef = T:Toggle("Auto collect", "Retry every 2 seconds while ON", saved.autoCollect, function(on)
+local refreshStageWatcher
+
+autoToggleRef = T:Toggle("Auto collect", "Full route every 2s after E on each chest", saved.autoCollect, function(on)
     loopGen = loopGen + 1
     local myGen = loopGen
     if on then
         Win:Status("Auto chests ON")
         task.spawn(function()
             while myGen == loopGen do
-                local n, err = collectAllChests()
+                local n, err = collectAllChests(function(_, _, msg)
+                    setHint(msg)
+                end)
                 if err then
                     setHint(err)
                 elseif n > 0 then
@@ -281,8 +452,101 @@ autoToggleRef = T:Toggle("Auto collect", "Retry every 2 seconds while ON", saved
     else
         Win:Status("Auto chests OFF")
     end
-    persistSettings(function() return autoToggleRef.Get() end, function() return queueToggleRef.Get() end)
+    persistAll()
 end)
+
+T:Section("Revive")
+T:Label("Waves.TryReviveUnit · all Profile.Equipped slots (uses your revives).")
+
+reviveToggleRef = T:Toggle("Auto revive", "Fire revive on equipped slots every 1.5s", saved.autoRevive, function(on)
+    reviveGen = reviveGen + 1
+    local myR = reviveGen
+    if on then
+        task.spawn(function()
+            while myR == reviveGen do
+                if not fireReviveAllSlots() then
+                    Win:Status("Revive: wait for Profile / Waves")
+                end
+                task.wait(1.5)
+            end
+        end)
+    end
+    persistAll()
+end)
+
+T:Section("Map ready")
+T:Label("Waves.Ready:FireServer() when intermission or Ready button shows (not already Ready).")
+
+readyToggleRef = T:Toggle("Auto ready up", "Checks ~1s · same as Ready in map HUD", saved.autoReadyUp, function(on)
+    readyGen = readyGen + 1
+    local myReady = readyGen
+    if on then
+        task.spawn(function()
+            while myReady == readyGen do
+                fireMapReady()
+                task.wait(1)
+            end
+        end)
+    end
+    persistAll()
+end)
+
+T:Section("Stage vote")
+T:Label("Round-end: Systems.Voting.Vote — Next if Play Next visible, else Retry if Restart visible.")
+
+nextStageToggleRef = T:Toggle("Auto play next map / stage", "Votes Next when the round-end screen offers it", saved.autoPlayNextMap, function()
+    persistAll()
+    if refreshStageWatcher then
+        refreshStageWatcher()
+    end
+end)
+
+retryStageToggleRef = T:Toggle("Auto retry stage", "Votes Retry when Restart is shown (e.g. after a loss)", saved.autoRetryStage, function()
+    persistAll()
+    if refreshStageWatcher then
+        refreshStageWatcher()
+    end
+end)
+
+refreshStageWatcher = function()
+    stageGen = stageGen + 1
+    local g = stageGen
+    local function anyStageAuto()
+        return (nextStageToggleRef and nextStageToggleRef.Get())
+            or (retryStageToggleRef and retryStageToggleRef.Get())
+    end
+    if not anyStageAuto() then
+        return
+    end
+    task.spawn(function()
+        local sawTimer = false
+        while g == stageGen do
+            if not anyStageAuto() then
+                break
+            end
+            local timer = ReplicatedStorage:GetAttribute("RoundEndTimer")
+            if timer == nil then
+                sawTimer = false
+            elseif not sawTimer then
+                sawTimer = true
+                task.spawn(function()
+                    task.wait(1.15)
+                    if g ~= stageGen or not anyStageAuto() then
+                        return
+                    end
+                    if ReplicatedStorage:GetAttribute("RoundEndTimer") == nil then
+                        return
+                    end
+                    fireRoundEndVote(
+                        nextStageToggleRef and nextStageToggleRef.Get(),
+                        retryStageToggleRef and retryStageToggleRef.Get()
+                    )
+                end)
+            end
+            task.wait(0.25)
+        end
+    end)
+end
 
 T:Section("Session")
 T:Label("Re-runs after game teleports (new server / lobby). Not after full disconnect — use executor auto-exec.")
@@ -299,7 +563,7 @@ queueToggleRef = T:Toggle(
             end
             Win:Status("Teleport queue OFF (saved)")
             Win:Notify("Re-exec", "Saved. No un-queue API for this session — re-paste to clear queue.", 4, "warning")
-            persistSettings(function() return autoToggleRef.Get() end, function() return queueToggleRef.Get() end)
+            persistAll()
             return
         end
         if getgenv then
@@ -315,7 +579,7 @@ queueToggleRef = T:Toggle(
         else
             Win:Notify("Re-exec", "queue_on_teleport missing — enable in executor or use auto-exec.", 5, "warning")
         end
-        persistSettings(function() return autoToggleRef.Get() end, function() return queueToggleRef.Get() end)
+        persistAll()
     end
 )
 
@@ -332,10 +596,22 @@ if saved.queueOnTeleport and not (getgenv and getgenv().BonusChestNoQueue == tru
     end)
 end
 
--- Restore auto loop from saved config (Toggle does not run cb on first paint)
+-- Restore toggles from saved config (Toggle does not run cb on first paint)
 task.defer(function()
     if saved.autoCollect and autoToggleRef then
         autoToggleRef.Set(true)
+    end
+    if saved.autoRevive and reviveToggleRef then
+        reviveToggleRef.Set(true)
+    end
+    if saved.autoPlayNextMap and nextStageToggleRef then
+        nextStageToggleRef.Set(true)
+    end
+    if saved.autoRetryStage and retryStageToggleRef then
+        retryStageToggleRef.Set(true)
+    end
+    if saved.autoReadyUp and readyToggleRef then
+        readyToggleRef.Set(true)
     end
 end)
 
