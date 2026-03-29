@@ -26,7 +26,7 @@
 
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
   Story: Story pad (MapList) → map + stage → queue Visual/Door → LaunchQueue / SetQueue → Start. Optional skips via getgenv (see tryAutoStartStoryOnce).
-  Optional: getgenv().BonusChestStoryMap; BonusChestStoryStage; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
+  Auto-start story/dungeon: live dropdown + inputs override getgenv defaults (so the GUI row is what runs). Optional: getgenv().BonusChestStoryMap / BonusChestStoryStage when no UI or for defaults; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
   Story pad prompt: BonusChestStoryPadFirePrompt = false to skip TP+fireproximityprompt+E when MapList still missing; BonusChestStoryPadAfterTpWait (sec); tag instances "StoryPad" for pad discovery.
   Story queue: blue Visual.Main; dungeon: red Main. First time each life: always one teleport to that queue (Main+Door); then no more until respawn. BonusChestStoryQueueReteleport = true to TP again when you leave the area. Story pad skips if already near pad.
   Optional LobbyMap.Queues pad prompts: BonusChestFireBlueQueuePadPrompt / BonusChestFireRedQueuePadPrompt = true (TP + fire ProximityPrompt before map UI); BonusChestQueuePadPromptYOffset.
@@ -4862,20 +4862,26 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "TP to pad → map/stag
     if on then
         task.spawn(function()
             while g == G.story and bonusChestUiAlive(UI_RUN_GEN) do
+                -- Live GUI wins over getgenv/saved so the row you see is what runs (getgenv was overriding the dropdown).
                 local mapKey = saved.storyMapKey
                 if getgenv and type(getgenv().BonusChestStoryMap) == "string" and #getgenv().BonusChestStoryMap > 0 then
                     mapKey = getgenv().BonusChestStoryMap
-                elseif storyMapDropdownRef then
+                end
+                if storyMapDropdownRef then
                     local _, v = storyMapDropdownRef.Get()
-                    if type(v) == "string" then
+                    if type(v) == "string" and #v > 0 then
                         mapKey = v
                     end
                 end
                 local st = saved.storyStage
                 if getgenv and type(getgenv().BonusChestStoryStage) == "number" then
                     st = getgenv().BonusChestStoryStage
-                elseif storyStageInputRef then
-                    st = tonumber(storyStageInputRef.Get()) or st
+                end
+                if storyStageInputRef then
+                    local n = tonumber(storyStageInputRef.Get())
+                    if n and n >= 1 then
+                        st = math.floor(n)
+                    end
                 end
                 local ok, why = tryAutoStartStoryOnce(mapKey, st)
                 if ok then
@@ -4950,7 +4956,8 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
                 local raidKey = saved.dungeonRaidKey
                 if getgenv and type(getgenv().BonusChestDungeonRaidKey) == "string" and #getgenv().BonusChestDungeonRaidKey > 0 then
                     raidKey = getgenv().BonusChestDungeonRaidKey
-                elseif dungeonRaidKeyInputRef then
+                end
+                if dungeonRaidKeyInputRef then
                     local s = dungeonRaidKeyInputRef.Get()
                     if type(s) == "string" then
                         s = (s:match("^%s*(.-)%s*$") or "")
@@ -4962,7 +4969,8 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
                 local dst = saved.dungeonStage
                 if getgenv and type(getgenv().BonusChestDungeonStage) == "number" then
                     dst = getgenv().BonusChestDungeonStage
-                elseif dungeonStageDropdownRef then
+                end
+                if dungeonStageDropdownRef then
                     local _, v = dungeonStageDropdownRef.Get()
                     if type(v) == "number" then
                         dst = v
