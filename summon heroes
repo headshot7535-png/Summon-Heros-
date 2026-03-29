@@ -331,11 +331,17 @@ end
 
 -- Raw script (Summon-Heros); re-fetched after teleport / server hop.
 local SCRIPT_SOURCE_URL = (getgenv and getgenv().BonusChestScriptUrl)
-    or "https://raw.githubusercontent.com/headshot7535-png/Summon-Heros-/main/summon%20heroes"
+    or "https://raw.githubusercontent.com/headshot7535-png/Summon-Heros-/refs/heads/main/summon%20heroes"
 
 local function tryQueueOnTeleport()
     if getgenv and getgenv().BonusChestNoQueue == true then
         return false, "skipped"
+    end
+    -- Only queue once per server session. Re-execution of the script should not
+    -- re-queue — the queue was already set before the server hop that brought us here.
+    local st = (getgenv and getgenv()) or _G
+    if st._BonusChestQueuedThisSession then
+        return true, "already_queued"
     end
     local code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
     local candidates = {
@@ -349,6 +355,7 @@ local function tryQueueOnTeleport()
         if type(fn) == "function" then
             local ok = pcall(fn, code)
             if ok then
+                st._BonusChestQueuedThisSession = true
                 return true, nil
             end
         end
@@ -359,6 +366,7 @@ end
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local LP = Players.LocalPlayer
 
 --- Re-exec: singleton state in getgenv/_G so connections and loops do not stack (major lag after teleport re-runs).
@@ -401,6 +409,9 @@ local function armBonusChestQueue()
     if saved.queueOnTeleport == false then
         return false, "off"
     end
+    -- Allow re-queuing when user explicitly re-enables the toggle.
+    local st = (getgenv and getgenv()) or _G
+    st._BonusChestQueuedThisSession = nil
     return tryQueueOnTeleport()
 end
 
@@ -431,6 +442,10 @@ pcall(function()
         if getgenv and getgenv().BonusChestNoQueue == true then
             return
         end
+        -- Clear the per-session flag so the fresh execution on the next server
+        -- is allowed to queue for the hop after that.
+        local st2 = (getgenv and getgenv()) or _G
+        st2._BonusChestQueuedThisSession = nil
         local code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
         if typeof(queue_on_teleport) == "function" then
             pcall(function()
@@ -439,6 +454,8 @@ pcall(function()
         else
             tryQueueOnTeleport()
         end
+        -- Re-set the flag so this server doesn't queue again if OnTeleport fires twice.
+        st2._BonusChestQueuedThisSession = true
     end)
 end)
 
@@ -3099,10 +3116,9 @@ local function tryStoryPadTeleportAndFirePromptOpenMapUi()
     end
     task.wait(0.3)
     pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
         task.wait(0.1)
-        vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
     end)
     return true
 end
@@ -3475,12 +3491,6 @@ local function fireTouchOnQueueParts(padModel)
     return main ~= nil
 end
 
---- Alias kept so existing call-sites (direct pad branches) don't need touching.
-local function teleportHrpToQueuePadMainWithOffset(padModel)
-    if not padModel then return false end
-    return fireTouchOnQueueParts(padModel)
-end
-
 --- SetQueue(slot, mapKey, stage) then LaunchQueue(slot); uses resolve* remotes (same as full UI path).
 local function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
     if not padModel then
@@ -3732,14 +3742,12 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
         if not pad then
             return false, "no_pad"
         end
-        if teleportHrpToQueuePadMainWithOffset(pad) then
-            task.wait(0.5)
-            if trySetQueueThenLaunchQueueForPadModel(pad, mapKey, stageNum) then
-                return true, nil
-            end
-            return false, "queue_remote_fail"
+        -- trySetQueueThenLaunchQueueForPadModel handles its own Door teleport
+        -- for RequestEnterQueue — no pre-teleport needed here.
+        if trySetQueueThenLaunchQueueForPadModel(pad, mapKey, stageNum) then
+            return true, nil
         end
-        return false, "no_hrp"
+        return false, "queue_remote_fail"
     end
 
     local slotInst = resolveStoryQueueLobbySlotInstance()
@@ -3937,14 +3945,12 @@ local function tryAutoStartDungeonOnce(raidKey, stageNum)
         if not pad then
             return false, "no_pad"
         end
-        if teleportHrpToQueuePadMainWithOffset(pad) then
-            task.wait(0.8)
-            if trySetQueueThenLaunchQueueForPadModel(pad, raidKey, stageNum) then
-                return true, nil
-            end
-            return false, "queue_remote_fail"
+        -- trySetQueueThenLaunchQueueForPadModel handles its own Door teleport
+        -- for RequestEnterQueue — no pre-teleport needed here.
+        if trySetQueueThenLaunchQueueForPadModel(pad, raidKey, stageNum) then
+            return true, nil
         end
-        return false, "no_hrp"
+        return false, "queue_remote_fail"
     end
 
     local dSlot = resolveDungeonQueueLobbySlotInstance()
@@ -4211,6 +4217,23 @@ local function moveToPrompt(root, part, prompt)
     end)
 end
 
+--- BasePart or Model tagged BonusChestPart — returns CFrame for teleport target.
+local function getBonusChestWorldCFrame(inst)
+    if not inst or not inst.Parent then
+        return nil
+    end
+    if inst:IsA("BasePart") then
+        return inst.CFrame
+    end
+    if inst:IsA("Model") then
+        local ok, cf = pcall(function()
+            return inst:GetPivot()
+        end)
+        return ok and cf or nil
+    end
+    return nil
+end
+
 --- progressCb(i, total, msg) optional — e.g. update hint while waiting for E.
 local function collectAllChests(progressCb)
     local root = getRoot()
@@ -4224,16 +4247,10 @@ local function collectAllChests(progressCb)
         if not (a and a.Parent and b and b.Parent and root and root.Parent) then
             return false
         end
-        local ok, da = pcall(function()
-            return (a.Position - root.Position).Magnitude
-        end)
-        local ok2, db = pcall(function()
-            return (b.Position - root.Position).Magnitude
-        end)
-        if not ok or not ok2 then
-            return false
-        end
-        return da < db
+        local cfA = getBonusChestWorldCFrame(a)
+        local cfB = getBonusChestWorldCFrame(b)
+        if not cfA or not cfB then return false end
+        return (cfA.Position - root.Position).Magnitude < (cfB.Position - root.Position).Magnitude
     end)
 
     local n = #parts
@@ -4267,23 +4284,6 @@ local function collectAllChests(progressCb)
     end
 
     return opened, nil
-end
-
---- BasePart or Model tagged BonusChestPart (auto loop); manual collect still expects parts with .Position where sort uses it.
-local function getBonusChestWorldCFrame(inst)
-    if not inst or not inst.Parent then
-        return nil
-    end
-    if inst:IsA("BasePart") then
-        return inst.CFrame
-    end
-    if inst:IsA("Model") then
-        local ok, cf = pcall(function()
-            return inst:GetPivot()
-        end)
-        return ok and cf or nil
-    end
-    return nil
 end
 
 -- ── NexusLib UI: IIFE — Win/persistAll must live INSIDE this function, not the script chunk (main chunk already at ~200 locals). ──
