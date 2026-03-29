@@ -5766,9 +5766,7 @@ task.defer(function()
     if playerTabRefs.walkSlider and type(playerTabRefs.walkSlider.Set) == "function" then
         playerTabRefs.walkSlider.Set(saved.playerWalkSpeed, false)
     end
-    if playerTabRefs.infiniteJump and type(playerTabRefs.infiniteJump.Set) == "function" then
-        playerTabRefs.infiniteJump.Set(saved.playerInfiniteJump == true)
-    end
+    -- Player tab: restore utility toggles first, Infinite Jump last (matches NexusLib PlayerTab; avoids dead JumpRequest until re-toggle).
     if playerTabRefs.antiAfk and type(playerTabRefs.antiAfk.Set) == "function" then
         playerTabRefs.antiAfk.Set(saved.playerAntiAfk == true)
     end
@@ -5777,6 +5775,9 @@ task.defer(function()
     end
     if playerTabRefs.godMode and type(playerTabRefs.godMode.Set) == "function" then
         playerTabRefs.godMode.Set(saved.playerGodMode == true)
+    end
+    if playerTabRefs.infiniteJump and type(playerTabRefs.infiniteJump.Set) == "function" then
+        playerTabRefs.infiniteJump.Set(saved.playerInfiniteJump == true)
     end
     task.spawn(function()
         task.wait(1.5)
