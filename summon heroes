@@ -3395,15 +3395,12 @@ retryStageToggleRef = TBattle:Toggle("Auto retry stage", "Votes Retry when Resta
     end
 end)
 
-local TUnits = Win:Tab("👥", "Units")
-TUnits:Section("Unit fusion")
-TUnits:Label("Auto: same-star main + 3 inventory fodder (lowest level). Manual: pick main + 3 sacrifices (inventory). Refresh lists after summon / move units.")
-
-do
+-- Separate function scope: nested `do` still shares the outer chunk's 200 locals in Luau.
+local function wireFuseUnitDropdowns(unitsTab)
     local statOpts0 = buildStatTraitUnitOptions()
     local sacOpts0 = buildFuseSacrificeSlotOptions()
     local sacParts0 = fuseParseCommaIds(saved.fuseSacrificeIds)
-    fuseMainUnitDropdownRef = TUnits:Dropdown(
+    fuseMainUnitDropdownRef = unitsTab:Dropdown(
         "Fuse main unit",
         "Equipped or inventory · first row = auto main",
         statOpts0,
@@ -3412,7 +3409,7 @@ do
             persistAll()
         end
     )
-    fuseSac1DropdownRef = TUnits:Dropdown(
+    fuseSac1DropdownRef = unitsTab:Dropdown(
         "Sacrifice 1",
         "Inventory only · None = use auto fodder",
         sacOpts0,
@@ -3421,7 +3418,7 @@ do
             persistAll()
         end
     )
-    fuseSac2DropdownRef = TUnits:Dropdown(
+    fuseSac2DropdownRef = unitsTab:Dropdown(
         "Sacrifice 2",
         "Must differ from Sac 1/3 and from main",
         sacOpts0,
@@ -3430,7 +3427,7 @@ do
             persistAll()
         end
     )
-    fuseSac3DropdownRef = TUnits:Dropdown(
+    fuseSac3DropdownRef = unitsTab:Dropdown(
         "Sacrifice 3",
         "Three picks required for manual fuse (or all None for auto)",
         sacOpts0,
@@ -3440,6 +3437,12 @@ do
         end
     )
 end
+
+local TUnits = Win:Tab("👥", "Units")
+TUnits:Section("Unit fusion")
+TUnits:Label("Auto: same-star main + 3 inventory fodder (lowest level). Manual: pick main + 3 sacrifices (inventory). Refresh lists after summon / move units.")
+
+wireFuseUnitDropdowns(TUnits)
 
 TUnits:Button("🔄", "Refresh unit lists", "Reload Profile units for dropdowns", nil, function()
     if refreshProfileUnitDropdowns then
@@ -3787,13 +3790,9 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
     persistAll()
 end)
 
-local TRoll = Win:Tab("🎲", "Rerolls")
-TRoll:Section("Stat reroll")
-TRoll:Label("UnitUpgrades.BuyStatReroll + RerollAction. Pick unit below (display names) or Auto — Refresh if list is empty.")
-
-do
+local function wireStatRerollUnitDropdown(rollTab)
     local suOpts = buildStatTraitUnitOptions()
-    statRerollUnitDropdownRef = TRoll:Dropdown(
+    statRerollUnitDropdownRef = rollTab:Dropdown(
         "Unit (stat reroll)",
         "Profile Equipped + Inventory · top = Auto",
         suOpts,
@@ -3803,6 +3802,25 @@ do
         end
     )
 end
+
+local function wireTraitRerollUnitDropdown(rollTab)
+    local tuOpts = buildStatTraitUnitOptions()
+    traitRerollUnitDropdownRef = rollTab:Dropdown(
+        "Unit (trait reroll)",
+        "Same list as stat reroll · Refresh on Units or here",
+        tuOpts,
+        dropdownIndexForSavedValue(tuOpts, saved.traitRerollUnitName or ""),
+        function()
+            persistAll()
+        end
+    )
+end
+
+local TRoll = Win:Tab("🎲", "Rerolls")
+TRoll:Section("Stat reroll")
+TRoll:Label("UnitUpgrades.BuyStatReroll + RerollAction. Pick unit below (display names) or Auto — Refresh if list is empty.")
+
+wireStatRerollUnitDropdown(TRoll)
 
 TRoll:Button("🔄", "Refresh unit lists", "Reload Equipped + Inventory for stat/trait/fuse dropdowns", nil, function()
     if refreshProfileUnitDropdowns then
@@ -3953,18 +3971,7 @@ end)
 TRoll:Section("Trait reroll")
 TRoll:Label("UnitUpgrades.BuyTraitReroll + TraitRerollAction (or RerollAction). Same unit dropdown pattern as stat reroll.")
 
-do
-    local tuOpts = buildStatTraitUnitOptions()
-    traitRerollUnitDropdownRef = TRoll:Dropdown(
-        "Unit (trait reroll)",
-        "Same list as stat reroll · Refresh on Units or here",
-        tuOpts,
-        dropdownIndexForSavedValue(tuOpts, saved.traitRerollUnitName or ""),
-        function()
-            persistAll()
-        end
-    )
-end
+wireTraitRerollUnitDropdown(TRoll)
 
 traitRerollGoalsInputRef = TRoll:Input(
     "Goal traits (comma)",
@@ -4340,7 +4347,7 @@ if saved.queueOnTeleport and not (getgenv and getgenv().BonusChestNoQueue == tru
 end
 
 -- Player tab after all main-tab refs exist so the first persistAll never wipes toggles with nil refs.
-do
+local function wirePlayerTab()
     local _, pref = Win:PlayerTab({
         saved = saved,
         onPersist = persistAll,
@@ -4351,6 +4358,7 @@ do
         end
     end
 end
+wirePlayerTab()
 
 -- Restore toggles from saved config (Toggle does not run cb on first paint)
 task.defer(function()
