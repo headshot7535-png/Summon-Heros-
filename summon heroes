@@ -2795,9 +2795,11 @@ local function collectAllChests(progressCb)
     return opened, nil
 end
 
--- ── NexusLib UI · multi-tab layout (do/end: avoids Luau 200-local limit on script chunk) ──
-do
-local Win = NexusLib:Window({ title = "Summon Heroes", width = 400, height = 760 })
+-- ── NexusLib UI: IIFE — locals here are not in the script chunk (Luau 200-register limit per function) ──
+local Win
+local persistAll
+;(function()
+Win = NexusLib:Window({ title = "Summon Heroes", width = 400, height = 760 })
 
 local THome = Win:Tab("🏠", "Home")
 THome:Section("Overview")
@@ -2890,7 +2892,7 @@ local claimDailyToggleRef
 local claimQuestsIntervalInputRef
 local playerTabRefs = {}
 
-local function persistAll()
+persistAll = function()
     local mapVal = saved.storyMapKey
     if storyMapDropdownRef then
         local _, v = storyMapDropdownRef.Get()
@@ -4450,4 +4452,4 @@ Win:Status(
     (reexecQueued and "Summon Heroes · teleport queue OK" or "Summon Heroes · NexusLib")
         .. _wf
 )
-end
+end)()
