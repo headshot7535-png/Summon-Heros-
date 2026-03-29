@@ -13,7 +13,7 @@
   Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
   Story: MAP SELECTION — tries Systems.Queue.SetQueue:FireServer(workspace.LobbyMap.Queues child, mapKey, stage) when remote + lobby exist; else GUI MapList → StageList → Start. Activate + getconnections when needed.
   Optional: getgenv().BonusChestStoryMap; BonusChestStoryStage; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
-  Queue slot: getgenv().BonusChestSetQueueSlotIndex = 4 (Lua child index, default 4) or BonusChestSetQueueSlotName = "QueueName" under LobbyMap.Queues.
+  Story queue: auto-picks LobbyMap.Queues child whose Visual.Main is blue (Neon); dungeon: red Main. Override: BonusChestSetQueueSlotIndex / BonusChestSetQueueSlotName (story), BonusChestDungeonQueueSlotIndex / BonusChestDungeonQueueSlotName (dungeon). Teleports to Visual.Main then Door unless BonusChestStorySkipQueueDoorTeleport = true.
   Dungeons: RaidSelect UI — each stage is a MapList row named "Dungeon" with attribute StageNum (1–3). Same Start button in that ScreenGui.
   Optional: getgenv().BonusChestDungeonRaidKey = "Dungeon"; getgenv().BonusChestDungeonStage = 1
 
@@ -705,6 +705,20 @@ local function resolveRotatingShopsBuy()
     else
         buyEv = node:FindFirstChild("BuyItem")
         modScript = findRotatingShopsModuleUnder(node)
+    end
+    if not buyEv or not isShopBuyRemote(buyEv) then
+        local sib = systems:FindFirstChild("BuyItem")
+        if sib and isShopBuyRemote(sib) then
+            buyEv = sib
+        end
+    end
+    if not buyEv or not isShopBuyRemote(buyEv) then
+        for _, d in ipairs(node:GetDescendants()) do
+            if d.Name == "BuyItem" and isShopBuyRemote(d) then
+                buyEv = d
+                break
+            end
+        end
     end
     if not buyEv or not isShopBuyRemote(buyEv) then
         return nil, nil
@@ -2789,8 +2803,70 @@ local function findLobbyMapWithQueues()
     return nil
 end
 
---- Instance passed to SetQueue — default 4th child of LobbyMap.Queues (matches common Cobalt dumps).
-local function resolveSetQueueLobbySlotInstance()
+local function getQueueVisualMainPart(queueModel)
+    if not queueModel then
+        return nil
+    end
+    local vis = queueModel:FindFirstChild("Visual")
+    if not vis then
+        return nil
+    end
+    local main = vis:FindFirstChild("Main")
+    if main and main:IsA("BasePart") then
+        return main
+    end
+    return nil
+end
+
+--- Blue Neon story marker (~110,170,255); red Persimmon dungeon (~255,92,71).
+local function visualMainLooksLikeStoryQueue(main)
+    if not main or not main:IsA("BasePart") then
+        return false
+    end
+    local ok, c = pcall(function()
+        return main.Color
+    end)
+    if not ok or typeof(c) ~= "Color3" then
+        return false
+    end
+    local r, g, b = c.R * 255, c.G * 255, c.B * 255
+    return b >= 130 and b > r + 25 and b > g - 15
+end
+
+local function visualMainLooksLikeDungeonQueue(main)
+    if not main or not main:IsA("BasePart") then
+        return false
+    end
+    local ok, c = pcall(function()
+        return main.Color
+    end)
+    if not ok or typeof(c) ~= "Color3" then
+        return false
+    end
+    local r, g, b = c.R * 255, c.G * 255, c.B * 255
+    return r >= 170 and r > b + 25 and r > g * 0.85
+end
+
+local function findQueueModelByVisualMainHue(queues, wantStory)
+    if not queues then
+        return nil
+    end
+    for _, m in ipairs(queues:GetChildren()) do
+        local main = getQueueVisualMainPart(m)
+        if main then
+            if wantStory and visualMainLooksLikeStoryQueue(main) then
+                return m
+            end
+            if not wantStory and visualMainLooksLikeDungeonQueue(main) then
+                return m
+            end
+        end
+    end
+    return nil
+end
+
+--- Story / SetQueue: blue Visual.Main queue, or explicit slot override.
+local function resolveStoryQueueLobbySlotInstance()
     local lm = findLobbyMapWithQueues()
     local queues = lm and lm:FindFirstChild("Queues")
     if not queues then
@@ -2799,18 +2875,111 @@ local function resolveSetQueueLobbySlotInstance()
     if getgenv and type(getgenv().BonusChestSetQueueSlotName) == "string" and #getgenv().BonusChestSetQueueSlotName > 0 then
         return queues:FindFirstChild(getgenv().BonusChestSetQueueSlotName)
     end
-    local slotIdx = 4
     if getgenv and type(getgenv().BonusChestSetQueueSlotIndex) == "number" then
-        slotIdx = math.floor(getgenv().BonusChestSetQueueSlotIndex)
+        local slotIdx = math.floor(getgenv().BonusChestSetQueueSlotIndex)
+        local ch = queues:GetChildren()
+        if slotIdx >= 1 and slotIdx <= #ch then
+            return ch[slotIdx]
+        end
+    end
+    if not (getgenv and getgenv().BonusChestStoryQueueSkipAutoHue == true) then
+        local byHue = findQueueModelByVisualMainHue(queues, true)
+        if byHue then
+            return byHue
+        end
     end
     local ch = queues:GetChildren()
+    local slotIdx = 5
     if slotIdx >= 1 and slotIdx <= #ch then
         return ch[slotIdx]
     end
     return nil
 end
 
---- Clicks map row → stage row → Start when the story map-select UI is visible; prefers SetQueue remote when available.
+--- Dungeon lobby queue: red Visual.Main, or explicit override (default child index 3).
+local function resolveDungeonQueueLobbySlotInstance()
+    local lm = findLobbyMapWithQueues()
+    local queues = lm and lm:FindFirstChild("Queues")
+    if not queues then
+        return nil
+    end
+    if getgenv and type(getgenv().BonusChestDungeonQueueSlotName) == "string" and #getgenv().BonusChestDungeonQueueSlotName > 0 then
+        return queues:FindFirstChild(getgenv().BonusChestDungeonQueueSlotName)
+    end
+    if getgenv and type(getgenv().BonusChestDungeonQueueSlotIndex) == "number" then
+        local slotIdx = math.floor(getgenv().BonusChestDungeonQueueSlotIndex)
+        local ch = queues:GetChildren()
+        if slotIdx >= 1 and slotIdx <= #ch then
+            return ch[slotIdx]
+        end
+    end
+    if not (getgenv and getgenv().BonusChestDungeonQueueSkipAutoHue == true) then
+        local byHue = findQueueModelByVisualMainHue(queues, false)
+        if byHue then
+            return byHue
+        end
+    end
+    local ch = queues:GetChildren()
+    local slotIdx = 3
+    if slotIdx >= 1 and slotIdx <= #ch then
+        return ch[slotIdx]
+    end
+    return nil
+end
+
+--- Stand on Visual.Main (blue/red Neon marker) then nudge — some games use Main.Touched instead of Door.
+local function tryTeleportToQueueVisualMain(slotModel)
+    local main = getQueueVisualMainPart(slotModel)
+    if not main then
+        return false
+    end
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        return false
+    end
+    local pos = main.Position
+    local lift = main.Size.Y * 0.5 + 2.8
+    pcall(function()
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.CFrame = CFrame.new(pos + Vector3.new(0, lift, 0))
+    end)
+    task.wait(0.06)
+    pcall(function()
+        hrp.CFrame = CFrame.new(pos + Vector3.new(0, math.max(1.4, lift * 0.5), 0))
+    end)
+    return true
+end
+
+--- Stand on/near queue Door so .Touched hooks fire (CFrame alone may not trigger without overlap).
+local function tryTeleportToQueueSlotDoor(slotModel)
+    if not slotModel or not slotModel.Parent then
+        return false
+    end
+    local door = slotModel:FindFirstChild("Door", true)
+    if not door or not door:IsA("BasePart") then
+        return false
+    end
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        return false
+    end
+    local pos = door.Position
+    local halfY = door.Size.Y * 0.5 + 2.5
+    local target = pos + Vector3.new(0, halfY, 0)
+    pcall(function()
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.CFrame = CFrame.new(target)
+    end)
+    task.wait(0.06)
+    pcall(function()
+        hrp.CFrame = CFrame.new(pos + Vector3.new(0, math.max(1.5, halfY * 0.45), 0))
+    end)
+    return true
+end
+
+--- Lobby: optional Door teleport + SetQueue, then map UI row → stage → Start (SetQueue alone often does not load the map).
 local function tryAutoStartStoryOnce(mapKey, stageNum)
     if type(mapKey) ~= "string" or #mapKey == 0 then
         return false, "bad_map"
@@ -2821,77 +2990,88 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
     end
     stageNum = math.floor(stageNum)
 
+    local slotInst = resolveStoryQueueLobbySlotInstance()
+    if slotInst and not (getgenv and getgenv().BonusChestStorySkipQueueDoorTeleport == true) then
+        tryTeleportToQueueVisualMain(slotInst)
+        task.wait(0.15)
+        tryTeleportToQueueSlotDoor(slotInst)
+        task.wait(0.2)
+    end
+
+    local didSetQueue = false
     local setEv = resolveSetQueueRemote()
-    if setEv then
-        local slotInst = resolveSetQueueLobbySlotInstance()
-        if slotInst then
-            local okFire
-            if setEv:IsA("RemoteFunction") then
-                okFire = select(1, pcall(function()
-                    setEv:InvokeServer(slotInst, mapKey, stageNum)
-                end))
-            else
-                okFire = select(1, pcall(function()
-                    setEv:FireServer(slotInst, mapKey, stageNum)
-                end))
-            end
-            if okFire then
-                return true, nil
-            end
+    if setEv and slotInst then
+        local okFire
+        if setEv:IsA("RemoteFunction") then
+            okFire = select(1, pcall(function()
+                setEv:InvokeServer(slotInst, mapKey, stageNum)
+            end))
+        else
+            okFire = select(1, pcall(function()
+                setEv:FireServer(slotInst, mapKey, stageNum)
+            end))
+        end
+        didSetQueue = okFire == true
+        if didSetQueue then
+            task.wait(0.15)
         end
     end
 
     local mapList, mapEntry = findStoryMapRow(mapKey)
-    if not mapList or not mapEntry then
-        return false, "no_ui"
-    end
-    local sg = screenGuiAncestor(mapList)
-    local mapLock = mapEntry:FindFirstChild("Container", true)
-    mapLock = mapLock and mapLock:FindFirstChild("LockState")
-    if mapLock and mapLock:IsA("GuiObject") and mapLock.Visible then
-        return false, "map_locked"
-    end
-    guiActivate(mapEntry:IsA("GuiButton") and mapEntry or mapEntry:FindFirstDescendantWhichIsA("GuiButton"))
-    task.wait(0.22)
-
-    local stageList = findStageListInScreenGui(sg)
-    if not stageList then
-        return false, "no_stage_list"
-    end
-    local sList = stageList:FindFirstChild("List")
-    if not sList then
-        return false, "no_stage_list"
-    end
-    local stageEntry
-    for _, ch in ipairs(sList:GetChildren()) do
-        local cont = ch:FindFirstChild("Container")
-        local lab = cont and cont:FindFirstChild("Label")
-        if lab and lab:IsA("TextLabel") and stageListLabelMatches(lab.Text, stageNum) then
-            stageEntry = ch
-            break
+    if mapList and mapEntry then
+        local sg = screenGuiAncestor(mapList)
+        local mapLock = mapEntry:FindFirstChild("Container", true)
+        mapLock = mapLock and mapLock:FindFirstChild("LockState")
+        if mapLock and mapLock:IsA("GuiObject") and mapLock.Visible then
+            return false, "map_locked"
         end
-    end
-    if not stageEntry then
-        return false, "no_stage"
-    end
-    local stLock = stageEntry:FindFirstChild("Container") and stageEntry.Container:FindFirstChild("LockState")
-    if stLock and stLock:IsA("GuiObject") and stLock.Visible then
-        return false, "stage_locked"
-    end
-    guiActivate(stageEntry:IsA("GuiButton") and stageEntry or stageEntry:FindFirstDescendantWhichIsA("GuiButton"))
-    task.wait(0.2)
+        guiActivate(mapEntry:IsA("GuiButton") and mapEntry or mapEntry:FindFirstDescendantWhichIsA("GuiButton"))
+        task.wait(0.22)
 
-    local startBtn = findStartButtonInScreenGui(sg)
-    if not startBtn then
-        return false, "no_start"
+        local stageList = findStageListInScreenGui(sg)
+        if not stageList then
+            return false, "no_stage_list"
+        end
+        local sList = stageList:FindFirstChild("List")
+        if not sList then
+            return false, "no_stage_list"
+        end
+        local stageEntry
+        for _, ch in ipairs(sList:GetChildren()) do
+            local cont = ch:FindFirstChild("Container")
+            local lab = cont and cont:FindFirstChild("Label")
+            if lab and lab:IsA("TextLabel") and stageListLabelMatches(lab.Text, stageNum) then
+                stageEntry = ch
+                break
+            end
+        end
+        if not stageEntry then
+            return false, "no_stage"
+        end
+        local stLock = stageEntry:FindFirstChild("Container") and stageEntry.Container:FindFirstChild("LockState")
+        if stLock and stLock:IsA("GuiObject") and stLock.Visible then
+            return false, "stage_locked"
+        end
+        guiActivate(stageEntry:IsA("GuiButton") and stageEntry or stageEntry:FindFirstDescendantWhichIsA("GuiButton"))
+        task.wait(0.2)
+
+        local startBtn = findStartButtonInScreenGui(sg)
+        if not startBtn then
+            return false, "no_start"
+        end
+        guiActivate(startBtn)
+        task.wait(0.08)
+        guiActivate(startBtn)
+        return true, nil
     end
-    guiActivate(startBtn)
-    task.wait(0.08)
-    guiActivate(startBtn)
-    return true, nil
+
+    if didSetQueue then
+        return true, nil
+    end
+    return false, "no_ui"
 end
 
---- Raid / dungeon: single list row selects map+stage; Start in same ScreenGui (RaidSelect).
+--- Raid / dungeon: red Visual.Main queue + Door, then single list row + Start (RaidSelect).
 local function tryAutoStartDungeonOnce(raidKey, stageNum)
     if type(raidKey) ~= "string" or #raidKey == 0 then
         return false, "bad_map"
@@ -2901,6 +3081,14 @@ local function tryAutoStartDungeonOnce(raidKey, stageNum)
         return false, "bad_stage"
     end
     stageNum = math.floor(stageNum)
+
+    local dSlot = resolveDungeonQueueLobbySlotInstance()
+    if dSlot and not (getgenv and getgenv().BonusChestDungeonSkipQueueTeleport == true) then
+        tryTeleportToQueueVisualMain(dSlot)
+        task.wait(0.15)
+        tryTeleportToQueueSlotDoor(dSlot)
+        task.wait(0.2)
+    end
 
     local mapList, row = findRaidMapRow(raidKey, stageNum)
     if not mapList or not row then
@@ -3600,7 +3788,7 @@ storyStageInputRef = TBattle:Input(
     end
 )
 
-storyStartToggleRef = TBattle:Toggle("Auto start story", "Lobby: Queue.SetQueue if present; else map UI · ~0.55s", saved.autoStartStory, function(on)
+storyStartToggleRef = TBattle:Toggle("Auto start story", "Blue Visual.Main queue · Door · SetQueue · Start", saved.autoStartStory, function(on)
     G.story = G.story + 1
     local g = G.story
     if on then
@@ -3681,7 +3869,7 @@ dungeonStageDropdownRef = TBattle:Dropdown(
     end
 )
 
-dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "While raid/dungeon picker is visible (~0.55s)", saved.autoStartDungeon, function(on)
+dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main queue + Door, then raid UI (~0.55s)", saved.autoStartDungeon, function(on)
     G.dungeon = G.dungeon + 1
     local g = G.dungeon
     if on then
