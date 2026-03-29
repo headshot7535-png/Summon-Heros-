@@ -15,7 +15,8 @@
   Bonus chest auto-collect + NexusLib UI (window title: Summon Heroes).
   Game: parts tagged "BonusChestPart", ProximityPrompt under Attachment (BonusChests system).
 
-  NexusLib: optional getgenv().NexusLibPath, then readfile("NexusLib.lua"), then GitHub URLs.
+  NexusLib v1.4: optional getgenv().NexusLibPath, then readfile("NexusLib.lua"), then GitHub URLs.
+  Chat tab (💬): Discord-style cross-server chat — reply, reactions, DM, mute, pin, emoji picker, typing indicators.
   Chests: TP in range, then executor fireproximityprompt (HoldDuration→0); falls back to E if no executor API.
 
   Re-run after server / lobby: queue_on_teleport on load + OnTeleport(RequestedByServer), like AniPixels. Optional:
@@ -286,6 +287,10 @@ end
 syncBonusChestNoQueueFromSaved()
 
 local NEXUSLIB_URLS = {
+    -- v1.4: Discord-style chat, ExploitTab
+    "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib1_4.lua",
+    "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib1_4",
+    -- v1.3 fallback
     "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib",
     "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib.lua",
 }
@@ -6020,7 +6025,9 @@ local function wirePlayerTab()
 end
 wirePlayerTab()
 
--- Restore toggles from saved config (Toggle:Set fires callback — starts/stops loops to match JSON)
+-- Chat tab: cross-server chat with Discord-style features (reply, reactions, DM, mute, ESP, etc.)
+Win:ChatTab()
+
 task.defer(function()
     hookSummonPackOpenedAutoSell()
     setAutoSellRarityInGame(3, saved.autoSellRare)
