@@ -505,29 +505,27 @@ local function guiObjectShownOnScreen(inst)
 end
 
 --- First FindFirstChild can hit a hidden template; prefer any *shown* instance with this name.
+local _pgShownCache = { name = "", t = 0, v = false }
+local PG_SHOWN_CACHE_SEC = 0.22
 local function playerGuiDescendantShown(name)
+    local now = os.clock()
+    if _pgShownCache.name == name and (now - _pgShownCache.t) < PG_SHOWN_CACHE_SEC then
+        return _pgShownCache.v
+    end
     local pg = LP:FindFirstChild("PlayerGui")
     if not pg then
+        _pgShownCache = { name = name, t = now, v = false }
         return false
     end
+    local out = false
     for _, d in ipairs(pg:GetDescendants()) do
         if d.Name == name and d:IsA("GuiObject") and guiObjectShownOnScreen(d) then
-            return true
+            out = true
+            break
         end
     end
-    return false
-end
-
-local ROUND_END_NEXT_NAMES = { "NextStageButton", "NextStage", "NextMapButton", "NextButton" }
-local ROUND_END_RETRY_NAMES = { "RestartButton", "RetryStage", "RetryButton", "Retry" }
-
-local function roundEndAnyNameVisible(names)
-    for _, n in ipairs(names) do
-        if playerGuiDescendantShown(n) then
-            return true
-        end
-    end
-    return false
+    _pgShownCache = { name = name, t = now, v = out }
+    return out
 end
 
 local function labelTextIsNextStage(txt)
@@ -548,7 +546,66 @@ local function labelTextIsRetryStage(txt)
     return string.find(s, "retry", 1, true) ~= nil
 end
 
---- Finds a visible GuiButton whose label text matches live UI ("Next Stage", "Retry Stage", etc.).
+local ROUND_END_NEXT_NAMES = { "NextStageButton", "NextStage", "NextMapButton", "NextButton" }
+local ROUND_END_RETRY_NAMES = { "RestartButton", "RetryStage", "RetryButton", "Retry" }
+
+--- One PlayerGui scan for both vote buttons (stage vote + fireRoundEndVote call this; avoids 4–8 full scans per tick).
+local function getRoundEndVoteButtonsVisible()
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then
+        return false, false
+    end
+    local nextSet, retrySet = {}, {}
+    for _, n in ipairs(ROUND_END_NEXT_NAMES) do
+        nextSet[n] = true
+    end
+    for _, n in ipairs(ROUND_END_RETRY_NAMES) do
+        retrySet[n] = true
+    end
+    local nextHit, retryHit = false, false
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("GuiObject") and (nextSet[d.Name] or retrySet[d.Name]) and guiObjectShownOnScreen(d) then
+            if nextSet[d.Name] then
+                nextHit = true
+            end
+            if retrySet[d.Name] then
+                retryHit = true
+            end
+            if nextHit and retryHit then
+                return true, true
+            end
+        elseif not nextHit or not retryHit then
+            if d:IsA("TextLabel") or d:IsA("TextButton") then
+                local txt = d.Text
+                if not nextHit and labelTextIsNextStage(txt) then
+                    local node = d
+                    while node do
+                        if node:IsA("GuiButton") and guiObjectShownOnScreen(node) then
+                            nextHit = true
+                            break
+                        end
+                        node = node.Parent
+                    end
+                elseif not retryHit and labelTextIsRetryStage(txt) then
+                    local node = d
+                    while node do
+                        if node:IsA("GuiButton") and guiObjectShownOnScreen(node) then
+                            retryHit = true
+                            break
+                        end
+                        node = node.Parent
+                    end
+                end
+            end
+        end
+        if nextHit and retryHit then
+            break
+        end
+    end
+    return nextHit, retryHit
+end
+
+--- Activate path for Voting:Vote — separate scan only when firing (getRoundEndVoteButtonsVisible already matched text).
 local function findShownGuiButtonForRoundEnd(which)
     local pg = LP:FindFirstChild("PlayerGui")
     if not pg then
@@ -571,20 +628,6 @@ local function findShownGuiButtonForRoundEnd(which)
         end
     end
     return nil
-end
-
-local function roundEndNextUiVisible()
-    if roundEndAnyNameVisible(ROUND_END_NEXT_NAMES) then
-        return true
-    end
-    return findShownGuiButtonForRoundEnd("next") ~= nil
-end
-
-local function roundEndRetryUiVisible()
-    if roundEndAnyNameVisible(ROUND_END_RETRY_NAMES) then
-        return true
-    end
-    return findShownGuiButtonForRoundEnd("retry") ~= nil
 end
 
 local function getTryReviveRemote()
@@ -2537,9 +2580,11 @@ local STORY_MAP_OPTIONS = (function()
     }
 end)()
 
-print("[SH] Story maps loaded: " .. #STORY_MAP_OPTIONS)
-for _, m in ipairs(STORY_MAP_OPTIONS) do
-    print("  " .. m.value .. " = " .. m.text)
+if getgenv and getgenv().BonusChestVerboseInit then
+    print("[SH] Story maps loaded: " .. #STORY_MAP_OPTIONS)
+    for _, m in ipairs(STORY_MAP_OPTIONS) do
+        print("  " .. m.value .. " = " .. m.text)
+    end
 end
 
 local function storyMapOptionIndexForKey(key)
@@ -2733,26 +2778,25 @@ local function findStartButtonInScreenGui(sg)
     if not sg or not sg:IsA("ScreenGui") then
         return nil
     end
-    for _, d in ipairs(sg:GetDescendants()) do
-        if d.Name == "StartButton" and d:IsA("GuiButton") and guiObjectShownOnScreen(d) then
-            return d
-        end
-    end
+    local fallback = nil
     for _, d in ipairs(sg:GetDescendants()) do
         if d:IsA("GuiButton") and guiObjectShownOnScreen(d) then
-            local n = string.lower(d.Name)
-            if n == "start" or n == "startbtn" or n == "startbutton" or string.sub(n, 1, 5) == "start" then
+            if d.Name == "StartButton" then
                 return d
             end
-            if d:IsA("TextButton") and textLooksLikeStart(d.Text) then
-                return d
-            end
-            if (d:IsA("ImageButton") or d:IsA("TextButton")) and guiButtonDisplaysStart(d) then
-                return d
+            if not fallback then
+                local n = string.lower(d.Name)
+                if n == "start" or n == "startbtn" or n == "startbutton" or string.sub(n, 1, 5) == "start" then
+                    fallback = d
+                elseif d:IsA("TextButton") and textLooksLikeStart(d.Text) then
+                    fallback = d
+                elseif (d:IsA("ImageButton") or d:IsA("TextButton")) and guiButtonDisplaysStart(d) then
+                    fallback = d
+                end
             end
         end
     end
-    return nil
+    return fallback
 end
 
 --- Map list lives in one ScreenGui; party "Start" may be in another enabled gui — search all.
@@ -2904,7 +2948,21 @@ local function stageListLabelMatches(labText, wantStage)
     return n == wantStage
 end
 
+local _storyLobbyPadPartCache = { t = 0, part = nil, miss = false }
+local STORY_WORLD_FIND_CACHE_SEC = 2.0
+
 local function findStoryLobbyPadPart()
+    local now = os.clock()
+    local c = _storyLobbyPadPartCache
+    if (now - c.t) < STORY_WORLD_FIND_CACHE_SEC then
+        if c.miss then
+            return nil
+        end
+        local p = c.part
+        if p and p.Parent and p:IsA("BasePart") then
+            return p
+        end
+    end
     for _, d in ipairs(workspace:GetDescendants()) do
         if d:IsA("ProximityPrompt") then
             local blob = string.lower(
@@ -2913,6 +2971,7 @@ local function findStoryLobbyPadPart()
             if string.find(blob, "story", 1, true) then
                 local p = d.Parent
                 if p and p:IsA("BasePart") then
+                    _storyLobbyPadPartCache = { t = now, part = p, miss = false }
                     return p
                 end
             end
@@ -2921,9 +2980,11 @@ local function findStoryLobbyPadPart()
     for _, nm in ipairs({ "StoryPad", "Story_Pad", "LobbyStory", "PadStory", "StorySpawn" }) do
         local p = workspace:FindFirstChild(nm, true)
         if p and p:IsA("BasePart") then
+            _storyLobbyPadPartCache = { t = now, part = p, miss = false }
             return p
         end
     end
+    _storyLobbyPadPartCache = { t = now, part = nil, miss = true }
     return nil
 end
 
@@ -2950,7 +3011,34 @@ local function tryTeleportToStoryPad(force)
 end
 
 --- Story / map select: ProximityPrompt on pad (broader match than findStoryLobbyPadPart). Optional CollectionService tag "StoryPad".
+local _storyMapPromptCache = { t = 0, prompt = nil, miss = false }
+
 local function findStoryMapSelectProximityPrompt()
+    local now = os.clock()
+    local c = _storyMapPromptCache
+    if (now - c.t) < STORY_WORLD_FIND_CACHE_SEC then
+        if c.miss then
+            return nil
+        end
+        local pr = c.prompt
+        if pr and pr.Parent and pr:IsA("ProximityPrompt") then
+            return pr
+        end
+    end
+    local ok0, tagged = pcall(function()
+        return CollectionService:GetTagged("StoryPad")
+    end)
+    if ok0 and type(tagged) == "table" then
+        for _, inst in ipairs(tagged) do
+            if inst and inst.Parent then
+                local pr = inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+                if pr then
+                    _storyMapPromptCache = { t = now, prompt = pr, miss = false }
+                    return pr
+                end
+            end
+        end
+    end
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("ProximityPrompt") then
             local pn = obj.Parent and string.lower(obj.Parent.Name) or ""
@@ -2961,23 +3049,12 @@ local function findStoryMapSelectProximityPrompt()
                 or string.find(actionText, "story", 1, true)
                 or string.find(actionText, "enter", 1, true)
                 or string.find(objText, "story", 1, true) then
+                _storyMapPromptCache = { t = now, prompt = obj, miss = false }
                 return obj
             end
         end
     end
-    local ok, tagged = pcall(function()
-        return CollectionService:GetTagged("StoryPad")
-    end)
-    if ok and type(tagged) == "table" then
-        for _, inst in ipairs(tagged) do
-            if inst and inst.Parent then
-                local pr = inst:FindFirstChildWhichIsA("ProximityPrompt", true)
-                if pr then
-                    return pr
-                end
-            end
-        end
-    end
+    _storyMapPromptCache = { t = now, prompt = nil, miss = true }
     return nil
 end
 
@@ -3171,16 +3248,33 @@ local function resolveRequestEnterQueueRemote()
     return findRemoteAnywhere("RequestEnterQueue")
 end
 
+local _lobbyMapCache = { t = 0, m = nil, miss = false }
+local LOBBY_MAP_CACHE_SEC = 4.0
+
 local function findLobbyMapWithQueues()
+    local now = os.clock()
+    local c = _lobbyMapCache
+    if (now - c.t) < LOBBY_MAP_CACHE_SEC then
+        if c.miss then
+            return nil
+        end
+        local lm = c.m
+        if lm and lm.Parent and lm:FindFirstChild("Queues") then
+            return lm
+        end
+    end
     local lm = workspace:FindFirstChild("LobbyMap")
     if lm and lm:FindFirstChild("Queues") then
+        _lobbyMapCache = { t = now, m = lm, miss = false }
         return lm
     end
     for _, d in ipairs(workspace:GetDescendants()) do
         if d.Name == "LobbyMap" and d:FindFirstChild("Queues") then
+            _lobbyMapCache = { t = now, m = d, miss = false }
             return d
         end
     end
+    _lobbyMapCache = { t = now, m = nil, miss = true }
     return nil
 end
 
@@ -3935,8 +4029,9 @@ local function fireRoundEndVote(wantNext, wantRetry)
     if not ev then
         return
     end
-    local nextShown = wantNext and roundEndNextUiVisible()
-    local restartShown = wantRetry and roundEndRetryUiVisible()
+    local nVis, rVis = getRoundEndVoteButtonsVisible()
+    local nextShown = wantNext and nVis
+    local restartShown = wantRetry and rVis
     local timerActive = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
 
     local function tryActivate(which)
@@ -4802,31 +4897,6 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "TP to pad → map/stag
                     local t = os.clock()
                     if t - G.lastStoryPadTp > 2.5 then
                         G.lastStoryPadTp = t
-                        -- Debug: print what the MapList actually contains right now
-                        pcall(function()
-                            local pg2 = LP:FindFirstChild("PlayerGui")
-                            if not pg2 then return end
-                            for _, ml in ipairs(pg2:GetDescendants()) do
-                                if ml.Name == "MapList" and ml:IsA("GuiObject") then
-                                    local holder2 = ml:FindFirstChild("ListContainer") and ml.ListContainer:FindFirstChild("List") or ml:FindFirstChild("List")
-                                    if holder2 then
-                                        local rowNames = {}
-                                        for _, ch in ipairs(holder2:GetChildren()) do
-                                            if not ch.Name:match("^UI") then
-                                                local txt = ""
-                                                for _, d in ipairs(ch:GetDescendants()) do
-                                                    if (d:IsA("TextLabel") or d:IsA("TextButton")) and #(d.Text or "") > 0 then
-                                                        txt = d.Text; break
-                                                    end
-                                                end
-                                                rowNames[#rowNames+1] = ch.Name .. (txt ~= "" and ("=["..txt.."]") or "")
-                                            end
-                                        end
-                                        print("[SH] MapList rows:", table.concat(rowNames, ", "))
-                                    end
-                                end
-                            end
-                        end)
                         if not (getgenv and getgenv().BonusChestStoryPadFirePrompt == false) and tryStoryPadTeleportAndFirePromptOpenMapUi() then
                             Win:Status("Story: Story pad — triggered prompt (wait for map UI)")
                         elseif tryTeleportToStoryPad() then
@@ -4933,8 +5003,7 @@ local function startStageVoteLoop()
     task.spawn(function()
         while thisId == stageVoteLoopId and bonusChestUiAlive(UI_RUN_GEN) do
             local timerActive = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
-            local uiNext = roundEndNextUiVisible()
-            local uiRetry = roundEndRetryUiVisible()
+            local uiNext, uiRetry = getRoundEndVoteButtonsVisible()
             if timerActive or uiNext or uiRetry then
                 local wantNext = nextStageToggleRef and nextStageToggleRef.Get()
                 local wantRetry = retryStageToggleRef and retryStageToggleRef.Get()
