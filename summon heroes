@@ -1,6 +1,7 @@
 --[[
-  Summon Heroes — FULL CLEANED automation (2026). One NexusLib window (Win:Window{ title, width, height }).
-  Re-execute: cleanupOldNexusLibGuiBeforeWindow() removes prior NexusLib_* ScreenGuis; loadConfig() runs each execution; task.defer applies every saved toggle (true/false). Do not destroy CoreGui by name — it breaks Roblox UI.
+  Summon Heroes — FIXED SAVE/LOAD + GUI CLEANUP + full automation (2026). One NexusLib window (Win:Window{ title, width, height }).
+  JSON: BonusChests_config.json (or getgenv().BonusChestConfigPath). persistAll() snapshots Toggle:Get() + inputs → saveConfig — OFF persists false. Toggle callbacks call persistAll() here.
+  Re-execute: cleanupOldNexusLibGuiBeforeWindow() removes NexusLib_* ScreenGuis only (avoid blanket PlayerGui deletes by "Window"/"Main"). loadConfig() each run; task.defer restores toggles from saved (true/false). Do not destroy CoreGui by name.
   Loop cancellation: each auto feature bumps a generation counter so the previous task.spawn loop exits (no stuck/overlapping loops).
     • G.loop — bonus chests auto   • G.revive — auto revive   • G.ready — map ready
     • G.story / G.dungeon — story & dungeon auto-start   • stageVoteLoopId — round-end Next / Retry vote
@@ -26,6 +27,8 @@
   Optional: getgenv().BonusChestStoryMap; BonusChestStoryStage; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
   Story pad prompt: BonusChestStoryPadFirePrompt = false to skip TP+fireproximityprompt+E when MapList still missing; BonusChestStoryPadAfterTpWait (sec); tag instances "StoryPad" for pad discovery.
   Story queue: blue Visual.Main; dungeon: red Main. First time each life: always one teleport to that queue (Main+Door); then no more until respawn. BonusChestStoryQueueReteleport = true to TP again when you leave the area. Story pad skips if already near pad.
+  Optional LobbyMap.Queues pad prompts: BonusChestFireBlueQueuePadPrompt / BonusChestFireRedQueuePadPrompt = true (TP + fire ProximityPrompt before map UI); BonusChestQueuePadPromptYOffset.
+  Direct remotes (no map UI): BonusChestStoryDirectPadSetQueueLaunch / BonusChestDungeonDirectPadSetQueueLaunch = true — TP to blue/red pad model, SetQueue then LaunchQueue; BonusChestSetQueueLaunchGap (sec).
   Dungeons: RaidSelect UI — each stage is a MapList row named "Dungeon" with attribute StageNum (1–3). Same Start button in that ScreenGui.
   Optional: getgenv().BonusChestDungeonRaidKey = "Dungeon"; getgenv().BonusChestDungeonStage = 1
 
@@ -3046,6 +3049,169 @@ local function findQueueModelByVisualMainHue(queues, wantStory)
     return nil
 end
 
+local function getLobbyQueuesFolder()
+    local lm = findLobbyMapWithQueues()
+    return lm and lm:FindFirstChild("Queues")
+end
+
+--- LobbyMap.Queues: ProximityPrompt on blue story or red dungeon Visual.Main or Door (same hue rules as resolve*Queue).
+local function findQueuePadPromptAndModelByHue(wantStory)
+    local queues = getLobbyQueuesFolder()
+    if not queues then
+        return nil, nil
+    end
+    for _, queueModel in ipairs(queues:GetChildren()) do
+        if queueModel:IsA("Model") then
+            local main = getQueueVisualMainPart(queueModel)
+            if main then
+                local hueOk = wantStory and visualMainLooksLikeStoryQueue(main) or visualMainLooksLikeDungeonQueue(main)
+                if hueOk then
+                    local door = queueModel:FindFirstChild("Door", true)
+                    local prompt = main:FindFirstChildWhichIsA("ProximityPrompt", true)
+                    if not prompt and door and door:IsA("BasePart") then
+                        prompt = door:FindFirstChildWhichIsA("ProximityPrompt", true)
+                    end
+                    if prompt then
+                        return prompt, queueModel
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+--- Tr. Blue / RGB(110,170,255) or hue fallback — matches LobbyMap.Queues story slot.
+local function queueMainMatchesBlueStoryLobbyColor(main)
+    if not main or not main:IsA("BasePart") then
+        return false
+    end
+    local ok, c = pcall(function()
+        return main.Color
+    end)
+    if ok and typeof(c) == "Color3" then
+        local r, g, b = c.R * 255, c.G * 255, c.B * 255
+        if math.abs(r - 110) < 5 and math.abs(g - 170) < 5 and math.abs(b - 255) < 5 then
+            return true
+        end
+    end
+    local ok2, bc = pcall(function()
+        return main.BrickColor
+    end)
+    if ok2 and bc and bc.Name == "Tr. Blue" then
+        return true
+    end
+    return visualMainLooksLikeStoryQueue(main)
+end
+
+--- Persimmon / RGB(255,92,71) or hue fallback — dungeon slot.
+local function queueMainMatchesRedDungeonLobbyColor(main)
+    if not main or not main:IsA("BasePart") then
+        return false
+    end
+    local ok, c = pcall(function()
+        return main.Color
+    end)
+    if ok and typeof(c) == "Color3" then
+        local r, g, b = c.R * 255, c.G * 255, c.B * 255
+        if math.abs(r - 255) < 5 and math.abs(g - 92) < 5 and math.abs(b - 71) < 5 then
+            return true
+        end
+    end
+    local ok2, bc = pcall(function()
+        return main.BrickColor
+    end)
+    if ok2 and bc and bc.Name == "Persimmon" then
+        return true
+    end
+    return visualMainLooksLikeDungeonQueue(main)
+end
+
+local function getStoryQueuePadModelByLobbyColor()
+    local queues = getLobbyQueuesFolder()
+    if not queues then
+        return nil
+    end
+    for _, model in ipairs(queues:GetChildren()) do
+        if model:IsA("Model") then
+            local main = getQueueVisualMainPart(model)
+            if main and queueMainMatchesBlueStoryLobbyColor(main) then
+                return model
+            end
+        end
+    end
+    return nil
+end
+
+local function getDungeonQueuePadModelByLobbyColor()
+    local queues = getLobbyQueuesFolder()
+    if not queues then
+        return nil
+    end
+    for _, model in ipairs(queues:GetChildren()) do
+        if model:IsA("Model") then
+            local main = getQueueVisualMainPart(model)
+            if main and queueMainMatchesRedDungeonLobbyColor(main) then
+                return model
+            end
+        end
+    end
+    return nil
+end
+
+--- TP to Visual.Main with offset (0, 6, 2) — lobby queue pad.
+local function teleportHrpToQueuePadMainWithOffset(padModel)
+    if not padModel then
+        return false
+    end
+    local main = getQueueVisualMainPart(padModel)
+    if not main then
+        return false
+    end
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        return false
+    end
+    pcall(function()
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.CFrame = main.CFrame * CFrame.new(0, 6, 2)
+    end)
+    task.wait(0.7)
+    return true
+end
+
+--- SetQueue(slot, mapKey, stage) then LaunchQueue(slot); uses resolve* remotes (same as full UI path).
+local function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
+    if not padModel then
+        return false
+    end
+    local gap = 0.6
+    if getgenv and type(getgenv().BonusChestSetQueueLaunchGap) == "number" then
+        gap = math.clamp(getgenv().BonusChestSetQueueLaunchGap, 0.05, 3)
+    end
+    local setEv = resolveSetQueueRemote()
+    if setEv then
+        if setEv:IsA("RemoteFunction") then
+            pcall(function()
+                setEv:InvokeServer(padModel, mapKey, stageNum)
+            end)
+        else
+            pcall(function()
+                setEv:FireServer(padModel, mapKey, stageNum)
+            end)
+        end
+        task.wait(gap)
+    end
+    local launchEv = resolveLaunchQueueRemote()
+    if launchEv and not (getgenv and getgenv().BonusChestSkipLaunchQueue == true) then
+        local ok = select(1, pcall(function()
+            launchEv:FireServer(padModel)
+        end))
+        return ok
+    end
+    return setEv ~= nil
+end
+
 --- Story / SetQueue: blue Visual.Main queue, or explicit slot override.
 local function resolveStoryQueueLobbySlotInstance()
     local lm = findLobbyMapWithQueues()
@@ -3225,7 +3391,30 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
     end
     stageNum = math.floor(stageNum)
 
+    if getgenv and getgenv().BonusChestStoryDirectPadSetQueueLaunch == true then
+        local pad = getStoryQueuePadModelByLobbyColor() or resolveStoryQueueLobbySlotInstance()
+        if not pad then
+            return false, "no_pad"
+        end
+        if teleportHrpToQueuePadMainWithOffset(pad) then
+            task.wait(0.8)
+            if trySetQueueThenLaunchQueueForPadModel(pad, mapKey, stageNum) then
+                return true, nil
+            end
+            return false, "queue_remote_fail"
+        end
+        return false, "no_hrp"
+    end
+
     local slotInst = resolveStoryQueueLobbySlotInstance()
+
+    if getgenv and getgenv().BonusChestFireBlueQueuePadPrompt == true then
+        local pr = select(1, findQueuePadPromptAndModelByHue(true))
+        if pr then
+            tryTeleportHumanoidToQueuePadPrompt(pr)
+            task.wait(0.35)
+        end
+    end
 
     -- Map/stage UI is tied to the Story pad; queue teleport *before* picks confuses the client. Nudge pad first.
     if not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
@@ -3366,7 +3555,31 @@ local function tryAutoStartDungeonOnce(raidKey, stageNum)
     end
     stageNum = math.floor(stageNum)
 
+    if getgenv and getgenv().BonusChestDungeonDirectPadSetQueueLaunch == true then
+        local pad = getDungeonQueuePadModelByLobbyColor() or resolveDungeonQueueLobbySlotInstance()
+        if not pad then
+            return false, "no_pad"
+        end
+        if teleportHrpToQueuePadMainWithOffset(pad) then
+            task.wait(0.8)
+            if trySetQueueThenLaunchQueueForPadModel(pad, raidKey, stageNum) then
+                return true, nil
+            end
+            return false, "queue_remote_fail"
+        end
+        return false, "no_hrp"
+    end
+
     local dSlot = resolveDungeonQueueLobbySlotInstance()
+
+    if getgenv and getgenv().BonusChestFireRedQueuePadPrompt == true then
+        local pr = select(1, findQueuePadPromptAndModelByHue(false))
+        if pr then
+            tryTeleportHumanoidToQueuePadPrompt(pr)
+            task.wait(0.35)
+        end
+    end
+
     if dSlot and not (getgenv and getgenv().BonusChestDungeonSkipQueueTeleport == true) then
         local reTp = getgenv and getgenv().BonusChestDungeonQueueReteleport == true
         local every = getgenv and getgenv().BonusChestDungeonQueueTeleportEveryTick == true
@@ -3510,6 +3723,38 @@ local function fireProximityPromptExec(prompt)
         warn("[AutoBonusChests] fireproximityprompt missing — using E fallback.")
     end
     return ok
+end
+
+--- TP above queue pad (Main/Door) and fire prompt. Optional: getgenv().BonusChestFireBlueQueuePadPrompt / BonusChestFireRedQueuePadPrompt = true; BonusChestQueuePadPromptYOffset (studs, default 6).
+local function tryTeleportHumanoidToQueuePadPrompt(prompt, yStuds)
+    yStuds = yStuds or 6
+    if getgenv and type(getgenv().BonusChestQueuePadPromptYOffset) == "number" then
+        yStuds = getgenv().BonusChestQueuePadPromptYOffset
+    end
+    if not prompt or not prompt:IsA("ProximityPrompt") then
+        return false
+    end
+    local par = prompt.Parent
+    local part
+    if par and par:IsA("Attachment") then
+        part = par.Parent
+    elseif par and par:IsA("BasePart") then
+        part = par
+    end
+    if not part or not part:IsA("BasePart") then
+        return false
+    end
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        return false
+    end
+    pcall(function()
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.CFrame = part.CFrame * CFrame.new(0, yStuds, 0)
+    end)
+    task.wait(0.6)
+    fireProximityPromptExec(prompt)
+    return true
 end
 
 --- Wait until the local player finishes the prompt (hold E / interact). Fallback if executor cannot fire.
@@ -3675,7 +3920,7 @@ Win = NexusLib:Window({ title = "Summon Heroes", width = 400, height = 760 })
 
 local THome = Win:Tab("🏠", "Home")
 THome:Section("Overview")
-THome:Label("Use tabs for each category. Player tab = movement. All settings save to BonusChests_config.json.")
+THome:Label("Use tabs for each category. Player tab = movement. Toggles persist to BonusChests_config.json (Get() on save; re-exec restores from file).")
 
 THome:Section("Bonus chests")
 THome:Label("BonusChestPart · TP + fireproximityprompt. Auto mode skips while in-round if workspace has RoundStarted=true (BonusChestChestsLobbyOnly=false to disable gate).")
@@ -3764,6 +4009,9 @@ local claimAchievementsToggleRef
 local claimDailyToggleRef
 local claimQuestsIntervalInputRef
 local playerTabRefs = {}
+
+-- ==================== SAVE / LOAD ====================
+-- persistAll: snapshot current UI (toggle:Get(), dropdowns, inputs) → saveConfig → writefile(JSON). Call from every toggle/input cb so false/off states save.
 
 persistAll = function()
     local mapVal = saved.storyMapKey
@@ -4135,6 +4383,9 @@ readyToggleRef = TBattle:Toggle("Auto ready up", "Checks ~1s · same as Ready in
     end
     persistAll()
 end)
+
+TBattle:Section("Story & Dungeon (Fully Fixed)")
+TBattle:Label("Blue = Story · Red = Dungeon · SetQueue + LaunchQueue (Systems.Queue). Color/RGB pad find + hue fallback. Optional: BonusChestStoryDirectPadSetQueueLaunch / BonusChestDungeonDirectPadSetQueueLaunch = true → TP pad → remotes (skip map UI).")
 
 TBattle:Section("Story / map select")
 TBattle:Label("Auto TP to Story pad → select map → stage → queue → Start. Works even if UI is closed (pad ProximityPrompt + optional fireproximityprompt / E).")
@@ -5396,8 +5647,8 @@ task.defer(function()
         task.wait(1.5)
         pcall(refreshProfileUnitDropdowns)
     end)
-    Win:Status(("Summon Heroes · latest settings from %s (re-exec)"):format(CONFIG_FILE))
-    print(("[AutoBonusChests] Re-exec OK · NexusLib_* cleaned · toggles synced · %s"):format(CONFIG_FILE))
+    Win:Status(("Summon Heroes · toggles restored from latest save · %s"):format(CONFIG_FILE))
+    print(("[AutoBonusChests] Save/load OK · GUI cleaned · toggles synced from %s"):format(CONFIG_FILE))
 end)
 
 pcall(function()
