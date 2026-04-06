@@ -1,71 +1,3 @@
---[[
-  Summon Heroes — FIXED SAVE/LOAD + GUI CLEANUP + full automation (2026). One NexusLib window (Win:Window{ title, width, height }).
-  JSON: BonusChests_config.json — loadConfig() at script start and again right before NexusLib:Window (re-exec = fresh read from disk). persistAll (debounced ~0.6s) uses persistToggleBool; persistAll(true) flushes immediately (e.g. BindToClose). After save, `saved` is merged from file for same-session reads.
-  Re-execute: NexusLib IIFE opens with a do-block that removes NexusLib_* ScreenGuis only (avoid blanket PlayerGui deletes by "Window"/"Main"). loadConfig() each run; task.defer restores toggles from saved (true/false). Do not destroy CoreGui by name.
-  Loop cancellation: each toggle bumps G.* so the prior loop for that feature exits; re-exec also bumps getgenv()._BonusChestUiGen so all prior UI loops stop (G is re-created each run).
-  Re-exec listeners: OnTeleport / CharacterAdded / re-arm loop disconnect or use separate gens so they do not stack.
-    • G.loop — bonus chests auto   • G.revive — auto revive   • G.ready — map ready
-    • G.story / G.dungeon — story & dungeon auto-start   • stageVoteLoopId — round-end Next / Retry vote
-    • G.fuse / G.summon / G.shop / G.statReroll / G.traitReroll / G.questClaim — units, shop, rerolls, claims
-  Toggles call persistAll() (debounced write); saved toggles are restored via Toggle:Set(savedValue) in task.defer (do not paste a second copy of this script).
-
-  Bonus chest auto: optional lobby-only when workspace:GetAttribute("RoundStarted") == true (disable with getgenv().BonusChestChestsLobbyOnly = false).
-  isInLobby() == (RoundStarted ~= true); used for chest gating and available for other checks.
-
-  Bonus chest auto-collect + NexusLib UI (window title: Summon Heroes).
-  Game: parts tagged "BonusChestPart", ProximityPrompt under Attachment (BonusChests system).
-
-  NexusLib v1.4: optional getgenv().NexusLibPath, then readfile("NexusLib.lua"), then GitHub URLs.
-  Chat tab (💬): Discord-style cross-server chat — reply, reactions, DM, mute, pin, emoji picker, typing indicators.
-  Chests: TP in range, then executor fireproximityprompt (HoldDuration→0); falls back to E if no executor API.
-
-  Re-run after server / lobby: queue_on_teleport on load + OnTeleport(RequestedByServer), like AniPixels. Optional:
-    getgenv().BonusChestScriptUrl = "https://..."  -- override script URL
-    getgenv().BonusChestNoQueue = true             -- skip queue_on_teleport
-    _G.BonusChest_AutoRejoin = true                -- force auto re-exec on (mirrors AniPixels _G.AniPixels_AutoRejoin)
-  Closing Roblox or losing connection cannot be hooked from Lua — use executor auto-execute.
-
-  Settings file: BonusChests_config.json — toggles + queueOnTeleport. Ready: Systems.Waves.Ready. Vote: Systems.Voting.Vote.
-  Story: Story pad (MapList) → map + stage → queue Visual/Door → LaunchQueue / SetQueue → Start. Optional skips via getgenv (see tryAutoStartStoryOnce).
-  Auto-start story/dungeon: live dropdown + inputs override getgenv defaults (so the GUI row is what runs). Optional: getgenv().BonusChestStoryMap / BonusChestStoryStage when no UI or for defaults; BonusChestStoryTeleportToPad = false to disable lobby pad TP when UI missing.
-  Story pad prompt: BonusChestStoryPadFirePrompt = false to skip TP+fireproximityprompt+E when MapList still missing; BonusChestStoryPadAfterTpWait (sec); tag instances "StoryPad" for pad discovery.
-  Story queue: blue Visual.Main; dungeon: red Main. First time each life: always one teleport to that queue (Main+Door); then no more until respawn. BonusChestStoryQueueReteleport = true to TP again when you leave the area. Story pad skips if already near pad.
-  Optional LobbyMap.Queues pad prompts: BonusChestFireBlueQueuePadPrompt / BonusChestFireRedQueuePadPrompt = true (TP + fire ProximityPrompt before map UI); BonusChestQueuePadPromptYOffset.
-  Direct remotes (no map UI): BonusChestStoryDirectPadSetQueueLaunch / BonusChestDungeonDirectPadSetQueueLaunch = true — TP to blue/red pad model, SetQueue then LaunchQueue; BonusChestSetQueueLaunchGap (sec).
-  Dungeons: RaidSelect UI — each stage is a MapList row named "Dungeon" with attribute StageNum (1–3). Same Start button in that ScreenGui.
-  Optional: getgenv().BonusChestDungeonRaidKey = "Dungeon"; getgenv().BonusChestDungeonStage = 1
-
-  Player tab (NexusLib): walk speed, infinite jump, anti-AFK (+ optional noclip / god / respawn).
-
-  Promo: Systems.PromoCodes.ClaimCode:FireServer(code). Set list via:
-    getgenv().BonusChestPromoCodes = { "CODE1", "CODE2" }  or edit PROMO_CODES_EDIT below.
-
-  Item / PvP shops: Systems.RotatingShops — BuyItem (RemoteEvent/Unreliable/RemoteFunction). Currency may be a Folder; CanAfford optional (server validates).
-  Filter: multi-select dropdown + optional extra comma names; * for any in-stock affordable item (edit ROTATING_SHOP_ITEM_OPTIONS in script).
-  Optional overrides: getgenv().BonusChestRotatingShopKey, getgenv().BonusChestRotatingShopFilter (comma list or * alone).
-  If BuyItem exists but no client module: use filter * only; optional getgenv().BonusChestRotatingShopSlots = { 4, 5 } to target slots (else tries 1–16).
-
-  Unit fusion: Systems.UnitFusion — PurchaseFuse(main, {3× sac}). Manual selection: exact folder Names (PlayerGui.Profile). Main: Equipped or Inventory/Units. Sacrifices: three comma-separated Names in Inventory/Units only. Empty main + empty sacrifices = auto by star filters.
-  Optional: getgenv().BonusChestFuseMainUnitId, getgenv().BonusChestFuseSacrificeIds = "a,b,c"
-
-  Summon: Systems.Summon — BuyPack:FireServer(packName, amount, "Gems"|"SummonTicket"); Mythic: BuyMythicBanner:FireServer().
-  Auto-sell: Settings AutoSell_Rarity3..6 (same as SUMMON UI). After PackOpened, script sells matching units after a delay (summon animation).
-  Optional: getgenv().BonusChestSummonPack = "Pack1"; BonusChestSummonAmount; BonusChestSummonCurrency; BonusChestSummonSellDelay (seconds).
-
-  Stat reroll: Systems.UnitUpgrades — BuyStatReroll(player, unitFolder, lockedStatNames[]); then RerollAction(player, "UseNew"|"KeepCurrent"). Locks cost extra gold per stat.
-  Optional: getgenv().BonusChestStatRerollUnit; BonusChestStatRerollMode ("always"|"better"); BonusChestStatRerollMaxRolls.
-
-  Trait reroll: same UnitUpgrades — BuyTraitReroll(player, unit); confirm with TraitRerollAction or RerollAction("UseNew"|"KeepCurrent"). Until-goal mode keeps current trait if roll does not match comma-separated goals (substring).
-  Optional: getgenv().BonusChestTraitRerollUnit; BonusChestTraitRerollGoals; BonusChestTraitRerollMode ("until_goal"|"always_apply"); BonusChestTraitRerollMaxRolls.
-
-  Quests UI (Achievements / Daily): Systems.Quests|Achievements|Quest modules, QuestFunction, QuestEvent (ReplicatedStorage.Systems or Remotes.Systems). Bulk + per-quest FireServer("Claim", id) using Profile / Players_Data hints. Server rejects invalid claims.
-  Optional: getgenv().BonusChestClaimQuestsIntervalSec
-  If daily claim still misses: getgenv().BonusChestDailyQuestIds = { "InternalQuestKey", ... } or numeric indices { 9, 10 } (same for BonusChestAchievementQuestIds).
-  Some games: Systems.Quests.ClaimQuest (RemoteFunction) :InvokeServer(questIndex) — supported alongside QuestEvent / QuestFunction.
-  Optional: getgenv().BonusChestClaimQuestNumericScanMax = 24 tries InvokeServer(1..n) when no quest ids were discovered (daily pass only).
-
-  Player tab (NexusLib): walk speed slider + toggles persist to the same JSON when changed; re-open script restores them.
-]]
 
 local HttpService = game:GetService("HttpService")
 
@@ -115,6 +47,7 @@ local function loadConfig()
         statRerollLockCooldown = false,
         statRerollLockSpeed = false,
         statRerollMode = "always",
+        statRerollStopTier = "OFF",
         statRerollMaxRolls = 0,
         statRerollDelaySec = 1.2,
         autoTraitReroll = false,
@@ -187,6 +120,7 @@ local function loadConfig()
         { "statRerollLockCooldown", "bool" },
         { "statRerollLockSpeed",    "bool" },
         { "statRerollMode",         "enum:always:better" },
+        { "statRerollStopTier",     "enum:OFF:D:C:B:A:S:SS:X:EX" },
         { "statRerollMaxRolls",     "intMin:0" },
         { "statRerollDelaySec",     "floatMin:0" },
         { "autoTraitReroll",        "bool" },
@@ -287,8 +221,6 @@ end
 syncBonusChestNoQueueFromSaved()
 
 local NEXUSLIB_URLS = {
-    -- Confirmed live URL (v1.4 with ChatTab + ExploitTab)
-    "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/refs/heads/main/Nexuslib",
     "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib",
     "https://raw.githubusercontent.com/headshot7535-png/Nexuslib/main/Nexuslib.lua",
 }
@@ -334,17 +266,11 @@ end
 
 -- Raw script (Summon-Heros); re-fetched after teleport / server hop.
 local SCRIPT_SOURCE_URL = (getgenv and getgenv().BonusChestScriptUrl)
-    or "https://raw.githubusercontent.com/headshot7535-png/Summon-Heros-/refs/heads/main/summon%20heroes"
+    or "https://raw.githubusercontent.com/headshot7535-png/Summon-Heros-/main/summon%20heroes"
 
 local function tryQueueOnTeleport()
     if getgenv and getgenv().BonusChestNoQueue == true then
         return false, "skipped"
-    end
-    -- Only queue once per server session. Re-execution of the script should not
-    -- re-queue — the queue was already set before the server hop that brought us here.
-    local st = (getgenv and getgenv()) or _G
-    if st._BonusChestQueuedThisSession then
-        return true, "already_queued"
     end
     local code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
     local candidates = {
@@ -358,7 +284,6 @@ local function tryQueueOnTeleport()
         if type(fn) == "function" then
             local ok = pcall(fn, code)
             if ok then
-                st._BonusChestQueuedThisSession = true
                 return true, nil
             end
         end
@@ -369,12 +294,71 @@ end
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-local LP = Players.LocalPlayer
+local LP
+for _ = 1, 60 do
+    LP = Players.LocalPlayer
+    if LP and LP:FindFirstChildOfClass("PlayerGui") then
+        break
+    end
+    task.wait(0.3)
+end
+if not LP then
+    error("[AutoBonusChests] LocalPlayer/PlayerGui not ready.")
+end
+
+-- Rule-aligned generation token: new run cancels old run cleanly.
+_G.ScriptGen = (_G.ScriptGen or 0) + 1
+local SCRIPT_GEN = _G.ScriptGen
+
+local _persist = (getgenv and getgenv()) or _G
+if type(_persist._BonusChestCleanupAll) == "function" then
+    pcall(_persist._BonusChestCleanupAll, "reexec")
+end
+
+local _conns, _threads = {}, {}
+local function addConn(c)
+    if c then _conns[#_conns + 1] = c end
+    return c
+end
+local function addThread(t)
+    if t then _threads[#_threads + 1] = t end
+    return t
+end
+local function connectTracked(signal, fn)
+    if not signal or type(fn) ~= "function" then
+        return nil
+    end
+    return addConn(signal:Connect(fn))
+end
+local function spawnTracked(fn)
+    if type(fn) ~= "function" then
+        return nil
+    end
+    return addThread(task.spawn(function()
+        if SCRIPT_GEN ~= _G.ScriptGen then
+            return
+        end
+        fn()
+    end))
+end
+local function cleanupAll()
+    for _, c in ipairs(_conns) do
+        pcall(function()
+            c:Disconnect()
+        end)
+    end
+    for _, t in ipairs(_threads) do
+        pcall(function()
+            task.cancel(t)
+        end)
+    end
+    _conns, _threads = {}, {}
+end
+_persist._BonusChestCleanupAll = cleanupAll
 
 --- Re-exec: singleton state in getgenv/_G so connections and loops do not stack (major lag after teleport re-runs).
 local function bonusChestPersist()
-    return (getgenv and getgenv()) or _G
+    return _persist
 end
 
 local function bonusChestBumpRearmGen()
@@ -386,12 +370,12 @@ end
 --- Bumped once per NexusLib UI load; previous run's auto task.spawn loops exit (G.* is local per chunk — re-exec could not cancel them).
 local function bonusChestBumpUiGen()
     local st = bonusChestPersist()
-    st._BonusChestUiGen = (st._BonusChestUiGen or 0) + 1
-    return st._BonusChestUiGen
+    st._SummonHeroesUiGen = (st._SummonHeroesUiGen or 0) + 1
+    return st._SummonHeroesUiGen
 end
 
 local function bonusChestUiAlive(capturedGen)
-    return capturedGen == ((bonusChestPersist()._BonusChestUiGen or 0))
+    return capturedGen == ((bonusChestPersist()._SummonHeroesUiGen or 0))
 end
 
 -- ── Auto re-exec (same idea as AniPixels): arm queue on load, re-queue on TeleportState.RequestedByServer, sync _G.BonusChest_AutoRejoin, periodic re-arm when toggled back on
@@ -412,9 +396,6 @@ local function armBonusChestQueue()
     if saved.queueOnTeleport == false then
         return false, "off"
     end
-    -- Allow re-queuing when user explicitly re-enables the toggle.
-    local st = (getgenv and getgenv()) or _G
-    st._BonusChestQueuedThisSession = nil
     return tryQueueOnTeleport()
 end
 
@@ -434,7 +415,7 @@ pcall(function()
         end)
         st._BonusChestOnTeleportConn = nil
     end
-    st._BonusChestOnTeleportConn = LP.OnTeleport:Connect(function(teleportState)
+    st._BonusChestOnTeleportConn = addConn(LP.OnTeleport:Connect(function(teleportState)
         if teleportState ~= Enum.TeleportState.RequestedByServer then
             return
         end
@@ -445,10 +426,6 @@ pcall(function()
         if getgenv and getgenv().BonusChestNoQueue == true then
             return
         end
-        -- Clear the per-session flag so the fresh execution on the next server
-        -- is allowed to queue for the hop after that.
-        local st2 = (getgenv and getgenv()) or _G
-        st2._BonusChestQueuedThisSession = nil
         local code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
         if typeof(queue_on_teleport) == "function" then
             pcall(function()
@@ -457,14 +434,12 @@ pcall(function()
         else
             tryQueueOnTeleport()
         end
-        -- Re-set the flag so this server doesn't queue again if OnTeleport fires twice.
-        st2._BonusChestQueuedThisSession = true
-    end)
+    end))
 end)
 
 do
     local rearmGen = bonusChestBumpRearmGen()
-    task.spawn(function()
+    spawnTracked(function()
         local wasOn = saved.queueOnTeleport ~= false
             and not (getgenv and getgenv().BonusChestNoQueue == true)
         while rearmGen == (bonusChestPersist()._BonusChestRearmGen or 0) do
@@ -1908,7 +1883,7 @@ local function hookSummonPackOpenedAutoSell()
         end)
         g._BonusChestPackOpenedSellConn = nil
     end
-    local conn = pe.OnClientEvent:Connect(function(_, units)
+    local conn = connectTracked(pe.OnClientEvent, function(_, units)
         if type(units) ~= "table" then
             return
         end
@@ -1964,6 +1939,18 @@ local STAT_REROLL_MODE_OPTIONS = {
     { text = "Only if better (unlocked)", value = "better" },
 }
 
+local STAT_REROLL_STOP_TIER_OPTIONS = {
+    { text = "Off", value = "OFF" },
+    { text = "D", value = "D" },
+    { text = "C", value = "C" },
+    { text = "B", value = "B" },
+    { text = "A", value = "A" },
+    { text = "S", value = "S" },
+    { text = "SS", value = "SS" },
+    { text = "X", value = "X" },
+    { text = "EX", value = "EX" },
+}
+
 local function statRerollModeDefaultIndex(m)
     if m == "better" then
         return 2
@@ -1971,11 +1958,46 @@ local function statRerollModeDefaultIndex(m)
     return 1
 end
 
+local function statRerollStopTierDefaultIndex(v)
+    v = type(v) == "string" and string.upper(v) or "OFF"
+    if v == "OFF" then
+        return 1
+    end
+    for i, row in ipairs(STAT_REROLL_STOP_TIER_OPTIONS) do
+        if row.value == v then
+            return i
+        end
+    end
+    return 1
+end
+
+local function normalizeStatTierToken(s)
+    if type(s) ~= "string" then
+        return ""
+    end
+    local t = string.upper((s:match("^%s*(.-)%s*$") or "")):gsub("%s+", "")
+    if t == "OFF" or t == "" then
+        return "OFF"
+    end
+    -- Common aliases.
+    if t == "E" then
+        t = "EX"
+    elseif t == "S+" then
+        t = "SS"
+    elseif t == "X+" then
+        t = "EX"
+    end
+    return t
+end
+
 local function statLetterScore(letter, curves)
     if type(letter) ~= "string" or #letter == 0 then
         return 0
     end
-    local L = letter:match("^%s*(%S+)%s*$") or letter
+    local L = normalizeStatTierToken(letter)
+    if L == "OFF" then
+        return 0
+    end
     if curves and type(curves.LetterMultiplier) == "function" then
         local ok, v = pcall(function()
             return curves:LetterMultiplier(L)
@@ -1983,6 +2005,12 @@ local function statLetterScore(letter, curves)
         if ok and type(v) == "number" then
             return v
         end
+    end
+    local fallback = {
+        D = 1, C = 2, B = 3, A = 4, S = 5, SS = 6, X = 7, EX = 8,
+    }
+    if fallback[L] then
+        return fallback[L]
     end
     local k = string.upper(string.sub(L, 1, 1))
     return LETTER_RANK_SCORE[k] or 0
@@ -1996,8 +2024,8 @@ local function getUnitStatLetter(unit, key)
         if type(s) ~= "string" or #s == 0 then
             return false
         end
-        local k = string.upper(string.sub(s, 1, 1))
-        return LETTER_RANK_SCORE[k] ~= nil
+        local tok = normalizeStatTierToken(s)
+        return tok ~= "" and tok ~= "OFF"
     end
     local v = unit:GetAttribute(key)
     if isRankString(v) then
@@ -2008,6 +2036,31 @@ local function getUnitStatLetter(unit, key)
         return alt
     end
     return nil
+end
+
+local getStatRerollUnlockedKeys
+
+local function statRerollReachedTargetTier(unit, lockedList, targetTier)
+    local target = normalizeStatTierToken(targetTier)
+    if target == "OFF" or not unit then
+        return false
+    end
+    local curves = getCurvesModule()
+    local targetScore = statLetterScore(target, curves)
+    if targetScore <= 0 then
+        return false
+    end
+    local unlocked = getStatRerollUnlockedKeys(lockedList or {})
+    if #unlocked == 0 then
+        return false
+    end
+    for _, key in ipairs(unlocked) do
+        local letter = getUnitStatLetter(unit, key) or ""
+        if statLetterScore(letter, curves) < targetScore then
+            return false
+        end
+    end
+    return true
 end
 
 local function buildStatRerollLockedList(lockAtk, lockHp, lockCd, lockSpd)
@@ -2027,7 +2080,7 @@ local function buildStatRerollLockedList(lockAtk, lockHp, lockCd, lockSpd)
     return locked
 end
 
-local function getStatRerollUnlockedKeys(lockedList)
+getStatRerollUnlockedKeys = function(lockedList)
     local skip = {}
     for _, k in ipairs(lockedList) do
         skip[k] = true
@@ -2344,7 +2397,149 @@ local function parseCommaGoals(str)
     return out
 end
 
-local function getUnitTraitDisplayName(unit)
+function buildTraitGoalCsvFromInputs(csvText, selectedTraits)
+    local out, seen = {}, {}
+    local function add(s)
+        if type(s) ~= "string" then
+            return
+        end
+        s = s:match("^%s*(.-)%s*$") or ""
+        if #s == 0 then
+            return
+        end
+        local key = string.lower(s)
+        if seen[key] then
+            return
+        end
+        seen[key] = true
+        out[#out + 1] = s
+    end
+    for _, s in ipairs(parseCommaGoals(csvText or "")) do
+        add(s)
+    end
+    if type(selectedTraits) == "table" then
+        for _, s in ipairs(selectedTraits) do
+            add(s)
+        end
+    end
+    return table.concat(out, ",")
+end
+
+function getAllTraitDefs()
+    local st = bonusChestPersist()
+    local cache = st._BonusChestTraitDefsCache
+    if type(cache) == "table" then
+        return cache
+    end
+    local traitDefs = {}
+    local ok, mod = pcall(function()
+        return require(game.ReplicatedStorage.Systems.Units.Traits)
+    end)
+    if ok and type(mod) == "table" then
+        for name, def in pairs(mod) do
+            if type(name) == "string" and type(def) == "table" then
+                traitDefs[name] = def
+            end
+        end
+    end
+    st._BonusChestTraitDefsCache = traitDefs
+    return traitDefs
+end
+
+function buildTraitKeepOptions()
+    local defs = getAllTraitDefs()
+    local list = {}
+    for name, def in pairs(defs) do
+        local rarity = tonumber(def and def.Rarity) or 0
+        local function pct(v)
+            if type(v) ~= "number" or v == 0 then
+                return nil
+            end
+            local sign = v > 0 and "+" or ""
+            return sign .. tostring(math.round(v * 1000) / 10) .. "%"
+        end
+        local bits = {}
+        local hp = pct(def and def.HP)
+        local dmg = pct(def and def.DMG)
+        local cd = pct(def and def.CD)
+        local spd = pct(def and def.SPD)
+        if hp then bits[#bits + 1] = "HP " .. hp end
+        if dmg then bits[#bits + 1] = "DMG " .. dmg end
+        if cd then bits[#bits + 1] = "CD " .. cd end
+        if spd then bits[#bits + 1] = "SPD " .. spd end
+        local statTxt = (#bits > 0) and (" · " .. table.concat(bits, " ")) or ""
+        list[#list + 1] = {
+            text = string.format("[R%d] %s%s", rarity, name, statTxt),
+            value = name,
+            rarity = rarity,
+            name = name,
+        }
+    end
+    table.sort(list, function(a, b)
+        if a.rarity ~= b.rarity then
+            return a.rarity < b.rarity
+        end
+        return string.lower(a.name) < string.lower(b.name)
+    end)
+    local opts = {}
+    for i, row in ipairs(list) do
+        opts[i] = { text = row.text, value = row.value }
+    end
+    if #opts == 0 then
+        local fallback = {
+            "Sturdy", "Brutal", "Nimble", "Swift",
+            "Berserker", "Godspeed", "Sprinter", "Vanguard",
+            "Overclocked", "Titan", "Divine", "Ultimate",
+        }
+        for i, name in ipairs(fallback) do
+            opts[i] = { text = name, value = name }
+        end
+    end
+    return opts
+end
+
+function getTraitOptionDefaultIndices(options, savedCsv)
+    local wanted = {}
+    for _, name in ipairs(parseCommaGoals(savedCsv or "")) do
+        wanted[string.lower(name)] = true
+    end
+    local indices = {}
+    for i, opt in ipairs(options or {}) do
+        local v = opt and opt.value
+        if type(v) == "string" and wanted[string.lower(v)] then
+            indices[#indices + 1] = i
+        end
+    end
+    return indices
+end
+
+local getUnitTraitDisplayName
+
+function getUnitRerollStatsText(unit)
+    if not unit then
+        return "No unit selected."
+    end
+    local name = getUnitDisplayTitle(unit)
+    local lv = unitAttrLevel(unit)
+    local stars = unitAttrStars(unit)
+    local atk = getUnitStatLetter(unit, "Attack") or "?"
+    local hp = getUnitStatLetter(unit, "Health") or "?"
+    local cd = getUnitStatLetter(unit, "Cooldown") or "?"
+    local spd = getUnitStatLetter(unit, "Speed") or "?"
+    local trait = ""
+    if type(getUnitTraitDisplayName) == "function" then
+        local ok, v = pcall(getUnitTraitDisplayName, unit)
+        if ok and type(v) == "string" then
+            trait = v
+        end
+    end
+    if #trait == 0 then
+        trait = "No Trait"
+    end
+    return string.format("%s · Lv%d · ★%d · ATK %s / HP %s / CD %s / SPD %s · Trait: %s", name, lv, stars, atk, hp, cd, spd, trait)
+end
+
+getUnitTraitDisplayName = function(unit)
     if not unit then
         return ""
     end
@@ -2415,10 +2610,12 @@ local function trySetSkipTraitRerollAnim(enabled)
     end
 end
 
---- Pick trait buy + confirm (TraitRerollAction, RerollTraitAction, or shared RerollAction).
+--- Pick trait reroll API:
+--- - two_step: buy pending + confirm (TraitRerollAction / RerollAction)
+--- - one_step: reroll is already applied (RerollTrait / BuyTraitReroll-only layouts)
 local function resolveTraitRerollFunctions(upgrades)
     if not upgrades then
-        return nil, nil
+        return nil, nil, nil
     end
     local pairsToTry = {
         { upgrades.BuyTraitReroll, upgrades.TraitRerollAction },
@@ -2431,18 +2628,28 @@ local function resolveTraitRerollFunctions(upgrades)
     for _, pr in ipairs(pairsToTry) do
         local buyFn, actFn = pr[1], pr[2]
         if type(buyFn) == "function" and type(actFn) == "function" then
-            return buyFn, actFn
+            return buyFn, actFn, "two_step"
         end
     end
-    return nil, nil
+    -- Some games expose a direct one-call trait reroll (already applies new trait).
+    if type(upgrades.RerollTrait) == "function" then
+        return upgrades.RerollTrait, nil, "one_step"
+    end
+    if type(upgrades.BuyTraitReroll) == "function" then
+        return upgrades.BuyTraitReroll, nil, "one_step"
+    end
+    if type(upgrades.PurchaseTraitReroll) == "function" then
+        return upgrades.PurchaseTraitReroll, nil, "one_step"
+    end
+    return nil, nil, nil
 end
 
---- Returns ok, reason: goal_met, discarded, used_new, buy_failed, no_module, no_unit, no_match, no_goals, already_goal, bad_roll
+--- Returns ok, reason: goal_met, discarded, used_new, applied_no_goal, buy_failed, no_module, no_unit, no_match, no_goals, already_goal, bad_roll
 local function tryTraitRerollOnce(opts)
     opts = opts or {}
     local upgrades = getUnitUpgradesModule()
-    local buyFn, actFn = resolveTraitRerollFunctions(upgrades)
-    if not buyFn or not actFn then
+    local buyFn, actFn, traitApiMode = resolveTraitRerollFunctions(upgrades)
+    if not buyFn then
         return false, "no_module"
     end
 
@@ -2473,7 +2680,7 @@ local function tryTraitRerollOnce(opts)
     if getgenv and type(getgenv().BonusChestTraitRerollGoals) == "string" then
         goalCsv = getgenv().BonusChestTraitRerollGoals
     end
-    local goals = parseCommaGoals(goalCsv)
+    local goals = parseCommaGoals(buildTraitGoalCsvFromInputs(goalCsv, opts.goalList))
 
     if mode == "until_goal" and #goals == 0 then
         return false, "no_goals"
@@ -2486,6 +2693,7 @@ local function tryTraitRerollOnce(opts)
         end
     end
 
+    local prevTrait = getUnitTraitDisplayName(unit)
     local okBuy, ret = pcall(function()
         return buyFn(upgrades, LP, unit)
     end)
@@ -2494,6 +2702,25 @@ local function tryTraitRerollOnce(opts)
     end
 
     local newTrait = parseTraitFromRerollResult(ret)
+    if #newTrait == 0 then
+        local afterTrait = getUnitTraitDisplayName(unit)
+        if #afterTrait > 0 and afterTrait ~= prevTrait then
+            newTrait = afterTrait
+        end
+    end
+
+    if traitApiMode == "one_step" then
+        if mode == "until_goal" then
+            if #newTrait == 0 then
+                return false, "bad_roll"
+            end
+            if traitNameMatchesGoals(newTrait, goals) then
+                return true, "goal_met"
+            end
+            return true, "applied_no_goal"
+        end
+        return true, "used_new"
+    end
 
     local useNew = true
     if mode == "until_goal" then
@@ -3119,9 +3346,10 @@ local function tryStoryPadTeleportAndFirePromptOpenMapUi()
     end
     task.wait(0.3)
     pcall(function()
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        local vim = game:GetService("VirtualInputManager")
+        vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
         task.wait(0.1)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
     end)
     return true
 end
@@ -3494,6 +3722,12 @@ local function fireTouchOnQueueParts(padModel)
     return main ~= nil
 end
 
+--- Alias kept so existing call-sites (direct pad branches) don't need touching.
+local function teleportHrpToQueuePadMainWithOffset(padModel)
+    if not padModel then return false end
+    return fireTouchOnQueueParts(padModel)
+end
+
 --- SetQueue(slot, mapKey, stage) then LaunchQueue(slot); uses resolve* remotes (same as full UI path).
 local function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
     if not padModel then
@@ -3630,7 +3864,7 @@ end
 
 --- Stand on Visual.Main (blue/red Neon marker) then nudge — some games use Main.Touched instead of Door.
 --- CFrame-snap HRP onto Visual.Main. firetouchinterest is client-only — not used.
-local function tryTeleportToQueueVisualMain(slotModel)
+function tryTeleportToQueueVisualMain(slotModel)
     local main = getQueueVisualMainPart(slotModel)
     if not main then return false end
     local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
@@ -3646,7 +3880,7 @@ local function tryTeleportToQueueVisualMain(slotModel)
 end
 
 --- CFrame-snap HRP onto Door. firetouchinterest is client-only — not used.
-local function tryTeleportToQueueSlotDoor(slotModel)
+function tryTeleportToQueueSlotDoor(slotModel)
     if not slotModel or not slotModel.Parent then return false end
     local door = slotModel:FindFirstChild("Door", true)
     if not door or not door:IsA("BasePart") then return false end
@@ -3662,11 +3896,11 @@ local function tryTeleportToQueueSlotDoor(slotModel)
     return true
 end
 
-local QUEUE_TELEPORT_SKIP_DIST = 72
+QUEUE_TELEPORT_SKIP_DIST = 72
 
 --- After first queue snap, do not TP again until respawn (unless BonusChestStoryQueueReteleport / dungeon equivalent).
-local storyQueueLobbyTeleportUsed = false
-local dungeonQueueLobbyTeleportUsed = false
+storyQueueLobbyTeleportUsed = false
+dungeonQueueLobbyTeleportUsed = false
 pcall(function()
     local st = bonusChestPersist()
     if st._BonusChestCharacterAddedConn then
@@ -3675,14 +3909,14 @@ pcall(function()
         end)
         st._BonusChestCharacterAddedConn = nil
     end
-    st._BonusChestCharacterAddedConn = LP.CharacterAdded:Connect(function()
+    st._BonusChestCharacterAddedConn = addConn(LP.CharacterAdded:Connect(function()
         storyQueueLobbyTeleportUsed = false
         dungeonQueueLobbyTeleportUsed = false
         _remoteCache = {}  -- clear cache so remotes are re-found after respawn/reload
-    end)
+    end))
 end)
 
-local function hrpWithinStudsOfQueueSlot(slotModel, maxDist)
+function hrpWithinStudsOfQueueSlot(slotModel, maxDist)
     maxDist = maxDist or QUEUE_TELEPORT_SKIP_DIST
     if not slotModel then
         return false
@@ -3717,7 +3951,7 @@ local function hrpWithinStudsOfQueueSlot(slotModel, maxDist)
     return best <= maxDist
 end
 
-local function queueTeleportSkipDistance()
+function queueTeleportSkipDistance()
     if getgenv and type(getgenv().BonusChestQueueTeleportSkipDist) == "number" then
         return math.clamp(getgenv().BonusChestQueueTeleportSkipDist, 8, 120)
     end
@@ -3725,7 +3959,7 @@ local function queueTeleportSkipDistance()
 end
 
 --- Lobby: Story pad (opens map UI) → map + stage → queue Door/Main → LaunchQueue / SetQueue → Start.
-local function tryAutoStartStoryOnce(mapKey, stageNum)
+function tryAutoStartStoryOnce(mapKey, stageNum)
     if type(mapKey) ~= "string" or #mapKey == 0 then
         return false, "bad_map"
     end
@@ -3745,12 +3979,14 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
         if not pad then
             return false, "no_pad"
         end
-        -- trySetQueueThenLaunchQueueForPadModel handles its own Door teleport
-        -- for RequestEnterQueue — no pre-teleport needed here.
-        if trySetQueueThenLaunchQueueForPadModel(pad, mapKey, stageNum) then
-            return true, nil
+        if teleportHrpToQueuePadMainWithOffset(pad) then
+            task.wait(0.5)
+            if trySetQueueThenLaunchQueueForPadModel(pad, mapKey, stageNum) then
+                return true, nil
+            end
+            return false, "queue_remote_fail"
         end
-        return false, "queue_remote_fail"
+        return false, "no_hrp"
     end
 
     local slotInst = resolveStoryQueueLobbySlotInstance()
@@ -3933,7 +4169,7 @@ local function tryAutoStartStoryOnce(mapKey, stageNum)
 end
 
 --- Raid / dungeon: red Visual.Main queue + Door, then single list row + Start (RaidSelect).
-local function tryAutoStartDungeonOnce(raidKey, stageNum)
+function tryAutoStartDungeonOnce(raidKey, stageNum)
     if type(raidKey) ~= "string" or #raidKey == 0 then
         return false, "bad_map"
     end
@@ -3948,12 +4184,14 @@ local function tryAutoStartDungeonOnce(raidKey, stageNum)
         if not pad then
             return false, "no_pad"
         end
-        -- trySetQueueThenLaunchQueueForPadModel handles its own Door teleport
-        -- for RequestEnterQueue — no pre-teleport needed here.
-        if trySetQueueThenLaunchQueueForPadModel(pad, raidKey, stageNum) then
-            return true, nil
+        if teleportHrpToQueuePadMainWithOffset(pad) then
+            task.wait(0.8)
+            if trySetQueueThenLaunchQueueForPadModel(pad, raidKey, stageNum) then
+                return true, nil
+            end
+            return false, "queue_remote_fail"
         end
-        return false, "queue_remote_fail"
+        return false, "no_hrp"
     end
 
     local dSlot = resolveDungeonQueueLobbySlotInstance()
@@ -4089,20 +4327,19 @@ local function fireRoundEndVote(wantNext, wantRetry)
     end
 end
 
-local function getRoot()
+function getRoot()
     local ch = LP.Character
     return ch and ch:FindFirstChild("HumanoidRootPart")
 end
 
-local function findChestPrompt(part)
+function findChestPrompt(part)
     if not part or not part:IsDescendantOf(workspace) then
         return nil
     end
     return part:FindFirstChildWhichIsA("ProximityPrompt", true)
 end
 
-local _warnedNoFirePrompt
-local function fireProximityPromptExec(prompt)
+function fireProximityPromptExec(prompt)
     if not prompt or not prompt:IsA("ProximityPrompt") then
         return false
     end
@@ -4123,15 +4360,15 @@ local function fireProximityPromptExec(prompt)
     pcall(function()
         prompt.HoldDuration = hold
     end)
-    if not ok and not _warnedNoFirePrompt then
-        _warnedNoFirePrompt = true
+    if not ok and not _persist._BonusChestWarnedNoFirePrompt then
+        _persist._BonusChestWarnedNoFirePrompt = true
         warn("[AutoBonusChests] fireproximityprompt missing — using E fallback.")
     end
     return ok
 end
 
 --- TP above queue pad (Main/Door) and fire prompt. Optional: getgenv().BonusChestFireBlueQueuePadPrompt / BonusChestFireRedQueuePadPrompt = true; BonusChestQueuePadPromptYOffset (studs, default 6).
-local function tryTeleportHumanoidToQueuePadPrompt(prompt, yStuds)
+function tryTeleportHumanoidToQueuePadPrompt(prompt, yStuds)
     yStuds = yStuds or 6
     if getgenv and type(getgenv().BonusChestQueuePadPromptYOffset) == "number" then
         yStuds = getgenv().BonusChestQueuePadPromptYOffset
@@ -4163,10 +4400,8 @@ local function tryTeleportHumanoidToQueuePadPrompt(prompt, yStuds)
 end
 
 --- Wait until the local player finishes the prompt (hold E / interact). Fallback if executor cannot fire.
-local CHEST_WAIT_SEC = 60
-
-local function waitForChestInteract(prompt, timeoutSec)
-    timeoutSec = timeoutSec or CHEST_WAIT_SEC
+function waitForChestInteract(prompt, timeoutSec)
+    timeoutSec = timeoutSec or 60
     if not prompt or not prompt:IsA("ProximityPrompt") or not prompt.Parent then
         return false
     end
@@ -4174,12 +4409,12 @@ local function waitForChestInteract(prompt, timeoutSec)
         return true
     end
     local done = false
-    local c1 = prompt.Triggered:Connect(function(player)
+    local c1 = connectTracked(prompt.Triggered, function(player)
         if player == LP then
             done = true
         end
     end)
-    local c2 = prompt:GetPropertyChangedSignal("Enabled"):Connect(function()
+    local c2 = connectTracked(prompt:GetPropertyChangedSignal("Enabled"), function()
         if not prompt.Enabled then
             done = true
         end
@@ -4193,7 +4428,7 @@ local function waitForChestInteract(prompt, timeoutSec)
     return done
 end
 
-local function moveToPrompt(root, part, prompt)
+function moveToPrompt(root, part, prompt)
     if not root or not root.Parent or not part or not part.Parent then
         return
     end
@@ -4220,25 +4455,8 @@ local function moveToPrompt(root, part, prompt)
     end)
 end
 
---- BasePart or Model tagged BonusChestPart — returns CFrame for teleport target.
-local function getBonusChestWorldCFrame(inst)
-    if not inst or not inst.Parent then
-        return nil
-    end
-    if inst:IsA("BasePart") then
-        return inst.CFrame
-    end
-    if inst:IsA("Model") then
-        local ok, cf = pcall(function()
-            return inst:GetPivot()
-        end)
-        return ok and cf or nil
-    end
-    return nil
-end
-
 --- progressCb(i, total, msg) optional — e.g. update hint while waiting for E.
-local function collectAllChests(progressCb)
+function collectAllChests(progressCb)
     local root = getRoot()
     if not root then
         return 0, "No character"
@@ -4250,10 +4468,16 @@ local function collectAllChests(progressCb)
         if not (a and a.Parent and b and b.Parent and root and root.Parent) then
             return false
         end
-        local cfA = getBonusChestWorldCFrame(a)
-        local cfB = getBonusChestWorldCFrame(b)
-        if not cfA or not cfB then return false end
-        return (cfA.Position - root.Position).Magnitude < (cfB.Position - root.Position).Magnitude
+        local ok, da = pcall(function()
+            return (a.Position - root.Position).Magnitude
+        end)
+        local ok2, db = pcall(function()
+            return (b.Position - root.Position).Magnitude
+        end)
+        if not ok or not ok2 then
+            return false
+        end
+        return da < db
     end)
 
     local n = #parts
@@ -4276,7 +4500,7 @@ local function collectAllChests(progressCb)
                     if progressCb then
                         progressCb(i, n, ("Chest %d/%d — press E or waiting…"):format(i, n))
                     end
-                    if not waitForChestInteract(prompt, CHEST_WAIT_SEC) then
+                    if not waitForChestInteract(prompt, 60) then
                         return opened, "Timed out on chest (try executor fireproximityprompt)"
                     end
                 end
@@ -4287,6 +4511,23 @@ local function collectAllChests(progressCb)
     end
 
     return opened, nil
+end
+
+--- BasePart or Model tagged BonusChestPart (auto loop); manual collect still expects parts with .Position where sort uses it.
+function getBonusChestWorldCFrame(inst)
+    if not inst or not inst.Parent then
+        return nil
+    end
+    if inst:IsA("BasePart") then
+        return inst.CFrame
+    end
+    if inst:IsA("Model") then
+        local ok, cf = pcall(function()
+            return inst:GetPivot()
+        end)
+        return ok and cf or nil
+    end
+    return nil
 end
 
 -- ── NexusLib UI: IIFE — Win/persistAll must live INSIDE this function, not the script chunk (main chunk already at ~200 locals). ──
@@ -4337,7 +4578,7 @@ end
 THome:Button("🎯", "Collect all now", "TP + fireproximityprompt (executor); E fallback", nil, function()
     Win:Status("Opening chests…")
     setHint("Running…")
-    task.spawn(function()
+    spawnTracked(function()
         local n, err = collectAllChests(function(_, _, msg)
             setHint(msg)
         end)
@@ -4392,7 +4633,9 @@ local sellLegendaryToggleRef
 local sellMythicToggleRef
 local statRerollToggleRef
 local statRerollUnitDropdownRef
+local statRerollUnitInfoRef
 local statRerollModeDropdownRef
+local statRerollStopTierDropdownRef
 local statRerollMaxRollsInputRef
 local statRerollDelayInputRef
 local statRerollLockAtkToggleRef
@@ -4401,6 +4644,8 @@ local statRerollLockCdToggleRef
 local statRerollLockSpdToggleRef
 local traitRerollToggleRef
 local traitRerollUnitDropdownRef
+local traitRerollUnitInfoRef
+local traitKeepMultiRef
 local traitRerollGoalsInputRef
 local traitRerollModeDropdownRef
 local traitRerollMaxRollsInputRef
@@ -4410,6 +4655,43 @@ local claimAchievementsToggleRef
 local claimDailyToggleRef
 local claimQuestsIntervalInputRef
 local playerTabRefs = {}
+
+local function getSelectedDropdownValue(ref)
+    if not ref or type(ref.Get) ~= "function" then
+        return ""
+    end
+    local _, v = ref.Get()
+    if type(v) == "string" then
+        return v
+    end
+    return ""
+end
+
+local function getTraitGoalCsvFromUi()
+    local csv = (traitRerollGoalsInputRef and traitRerollGoalsInputRef.Get and traitRerollGoalsInputRef.Get())
+    if type(csv) ~= "string" then
+        csv = saved and saved.traitRerollGoals or ""
+    end
+    local values = nil
+    if traitKeepMultiRef and type(traitKeepMultiRef.Get) == "function" then
+        local _, selectedValues = traitKeepMultiRef.Get()
+        values = selectedValues
+    end
+    return buildTraitGoalCsvFromInputs(csv, values)
+end
+
+local function refreshSelectedRerollUnitStats()
+    local sName = getSelectedDropdownValue(statRerollUnitDropdownRef)
+    local tName = getSelectedDropdownValue(traitRerollUnitDropdownRef)
+    local sUnit = resolveStatRerollUnit(sName)
+    local tUnit = resolveStatRerollUnit(tName)
+    if statRerollUnitInfoRef and type(statRerollUnitInfoRef.Set) == "function" then
+        statRerollUnitInfoRef.Set("Stat target: " .. getUnitRerollStatsText(sUnit))
+    end
+    if traitRerollUnitInfoRef and type(traitRerollUnitInfoRef.Set) == "function" then
+        traitRerollUnitInfoRef.Set("Trait target: " .. getUnitRerollStatsText(tUnit))
+    end
+end
 
 -- ==================== SAVE / LOAD ====================
 -- persistAll: snapshot UI → saveConfig → writefile; then merge JSON back into `saved`. Booleans use persistToggleBool(ref, fallback) — never `ref and ref.Get() or saved.x` for toggles.
@@ -4581,6 +4863,16 @@ local function persistAllWriteNow()
             end
             return m
         end)(),
+        statRerollStopTier = (function()
+            local v = saved.statRerollStopTier
+            if statRerollStopTierDropdownRef and type(statRerollStopTierDropdownRef.Get) == "function" then
+                local _, pick = statRerollStopTierDropdownRef.Get()
+                if type(pick) == "string" and #pick > 0 then
+                    v = pick
+                end
+            end
+            return normalizeStatTierToken(v)
+        end)(),
         statRerollMaxRolls = math.max(
             0,
             math.floor(tonumber(statRerollMaxRollsInputRef and statRerollMaxRollsInputRef.Get() or saved.statRerollMaxRolls) or 0)
@@ -4600,7 +4892,7 @@ local function persistAllWriteNow()
             end
             return saved.traitRerollUnitName
         end)(),
-        traitRerollGoals = traitRerollGoalsInputRef and traitRerollGoalsInputRef.Get() or saved.traitRerollGoals,
+        traitRerollGoals = getTraitGoalCsvFromUi(),
         traitRerollMode = (function()
             local m = saved.traitRerollMode
             if traitRerollModeDropdownRef then
@@ -4733,7 +5025,7 @@ local G = {
 -- ==================== AUTO BONUS CHESTS ====================
 -- G.loop acts as generation id (same idea as chestLoopId): incrementing kills the previous loop.
 local function runAutoBonusChestLoop(gen)
-    task.spawn(function()
+    spawnTracked(function()
         Win:Status("Auto Bonus Chests → ENABLED")
         while gen == G.loop and bonusChestUiAlive(UI_RUN_GEN) do
             if isBonusChestLobbyForAutoCollect() then
@@ -4801,7 +5093,7 @@ reviveToggleRef = TBattle:Toggle("Auto revive", "Fire revive on equipped slots e
     G.revive = G.revive + 1
     local myR = G.revive
     if on then
-        task.spawn(function()
+        spawnTracked(function()
             while myR == G.revive and bonusChestUiAlive(UI_RUN_GEN) do
                 if not getTryReviveRemote() or not getEquippedFolder() then
                     Win:Status("Revive: wait for Profile / Waves")
@@ -4822,7 +5114,7 @@ readyToggleRef = TBattle:Toggle("Auto ready up", "Checks ~1s · same as Ready in
     G.ready = G.ready + 1
     local myReady = G.ready
     if on then
-        task.spawn(function()
+        spawnTracked(function()
             while myReady == G.ready and bonusChestUiAlive(UI_RUN_GEN) do
                 fireMapReady()
                 task.wait(1)
@@ -4863,7 +5155,7 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "TP to pad → map/stag
     G.story = G.story + 1
     local g = G.story
     if on then
-        task.spawn(function()
+        spawnTracked(function()
             while g == G.story and bonusChestUiAlive(UI_RUN_GEN) do
                 -- Live GUI wins over getgenv/saved so the row you see is what runs (getgenv was overriding the dropdown).
                 local mapKey = saved.storyMapKey
@@ -4954,7 +5246,7 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
     G.dungeon = G.dungeon + 1
     local g = G.dungeon
     if on then
-        task.spawn(function()
+        spawnTracked(function()
             while g == G.dungeon and bonusChestUiAlive(UI_RUN_GEN) do
                 local raidKey = saved.dungeonRaidKey
                 if getgenv and type(getgenv().BonusChestDungeonRaidKey) == "string" and #getgenv().BonusChestDungeonRaidKey > 0 then
@@ -5008,7 +5300,7 @@ local function startStageVoteLoop()
     stageVoteLoopId = stageVoteLoopId + 1
     local thisId = stageVoteLoopId
     Win:Status("Stage Auto-Vote → ENABLED")
-    task.spawn(function()
+    spawnTracked(function()
         while thisId == stageVoteLoopId and bonusChestUiAlive(UI_RUN_GEN) do
             local timerActive = ReplicatedStorage:GetAttribute("RoundEndTimer") ~= nil
             local uiNext, uiRetry = getRoundEndVoteButtonsVisible()
@@ -5146,7 +5438,7 @@ fuseFodderMaxInputRef = TUnits:Input(
 )
 
 TUnits:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time", nil, function()
-    task.spawn(function()
+    spawnTracked(function()
         local mainStr = saved.fuseMainUnitId
         if fuseMainUnitDropdownRef then
             local _, mainV = fuseMainUnitDropdownRef.Get()
@@ -5209,7 +5501,7 @@ fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile i
     G.fuse = G.fuse + 1
     local g = G.fuse
     if on then
-        task.spawn(function()
+        spawnTracked(function()
             while g == G.fuse and bonusChestUiAlive(UI_RUN_GEN) do
                 local o = {
                     minStars = saved.fuseMinStars,
@@ -5335,7 +5627,7 @@ sellMythicToggleRef = TUnits:Toggle("Auto-sell Mythic", "Rarity 6", saved.autoSe
 end)
 
 TUnits:Button("✨", "Summon once", "BuyPack or BuyMythicBanner once", nil, function()
-    task.spawn(function()
+    spawnTracked(function()
         local _, pack = summonPackDropdownRef.Get()
         local amt = tonumber(summonAmountInputRef.Get()) or 1
         local _, cur = summonCurrencyDropdownRef.Get()
@@ -5352,7 +5644,7 @@ summonToggleRef = TUnits:Toggle("Auto summon heroes", "Every ~1.2s · same as sh
     G.summon = G.summon + 1
     local g = G.summon
     if on then
-        task.spawn(function()
+        spawnTracked(function()
             while g == G.summon and bonusChestUiAlive(UI_RUN_GEN) do
                 local _, pack = summonPackDropdownRef.Get()
                 pack = (type(pack) == "string" and pack) or saved.summonPack
@@ -5419,7 +5711,7 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
     G.shop = G.shop + 1
     local g = G.shop
     if on then
-        task.spawn(function()
+        spawnTracked(function()
             while g == G.shop and bonusChestUiAlive(UI_RUN_GEN) do
                 local shopKey = saved.rotatingShopKey
                 if getgenv and type(getgenv().BonusChestRotatingShopKey) == "string" and #getgenv().BonusChestRotatingShopKey > 0 then
@@ -5490,6 +5782,7 @@ local function wireStatRerollUnitDropdown(rollTab)
         dropdownIndexForSavedValue(suOpts, saved.statRerollUnitName or ""),
         function()
             persistAll()
+            task.defer(refreshSelectedRerollUnitStats)
         end
     )
 end
@@ -5503,6 +5796,7 @@ local function wireTraitRerollUnitDropdown(rollTab)
         dropdownIndexForSavedValue(tuOpts, saved.traitRerollUnitName or ""),
         function()
             persistAll()
+            task.defer(refreshSelectedRerollUnitStats)
         end
     )
 end
@@ -5512,6 +5806,7 @@ TRoll:Section("Stat reroll")
 TRoll:Label("UnitUpgrades.BuyStatReroll + RerollAction. Pick unit below (display names) or Auto — Refresh if list is empty.")
 
 wireStatRerollUnitDropdown(TRoll)
+statRerollUnitInfoRef = TRoll:Label("Stat target: Select a unit to view current stats.")
 
 TRoll:Button("🔄", "Refresh unit lists", "Reload Equipped + Inventory for stat/trait/fuse dropdowns", nil, function()
     if refreshProfileUnitDropdowns then
@@ -5525,6 +5820,16 @@ statRerollModeDropdownRef = TRoll:Dropdown(
     "Better = sum of letter tiers on unlocked stats only (Curves.LetterMultiplier if present)",
     STAT_REROLL_MODE_OPTIONS,
     statRerollModeDefaultIndex(saved.statRerollMode),
+    function()
+        persistAll()
+    end
+)
+
+statRerollStopTierDropdownRef = TRoll:Dropdown(
+    "Stop at tier (auto)",
+    "Auto stops when all unlocked stats are at or above this tier (supports S/X/EX)",
+    STAT_REROLL_STOP_TIER_OPTIONS,
+    statRerollStopTierDefaultIndex(saved.statRerollStopTier),
     function()
         persistAll()
     end
@@ -5567,7 +5872,7 @@ statRerollDelayInputRef = TRoll:Input(
 )
 
 TRoll:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent per policy", nil, function()
-    task.spawn(function()
+    spawnTracked(function()
         local _, mode = statRerollModeDropdownRef.Get()
         local modeStr = (mode == "better" and "better") or "always"
         local ok, why = tryStatRerollOnce({
@@ -5586,6 +5891,7 @@ TRoll:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent pe
             lockSpd = statRerollLockSpdToggleRef.Get(),
             mode = modeStr,
         })
+        task.defer(refreshSelectedRerollUnitStats)
         if why == "no_module" then
             Win:Notify("Stat reroll", "UnitUpgrades module not found.", 4, "error")
         elseif why == "no_unit" then
@@ -5606,7 +5912,8 @@ statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls 
     G.statReroll = G.statReroll + 1
     local g = G.statReroll
     if on then
-        task.spawn(function()
+        Win:Status("Auto stat reroll ON")
+        spawnTracked(function()
             local rolls = 0
             while g == G.statReroll and bonusChestUiAlive(UI_RUN_GEN) do
                 local maxR = tonumber(statRerollMaxRollsInputRef.Get()) or saved.statRerollMaxRolls
@@ -5620,26 +5927,65 @@ statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls 
                     persistAll()
                     break
                 end
+                local unitFilter = (function()
+                    if statRerollUnitDropdownRef then
+                        local _, v = statRerollUnitDropdownRef.Get()
+                        if type(v) == "string" then
+                            return v
+                        end
+                    end
+                    return ""
+                end)()
+                local lockedList = buildStatRerollLockedList(
+                    statRerollLockAtkToggleRef.Get(),
+                    statRerollLockHpToggleRef.Get(),
+                    statRerollLockCdToggleRef.Get(),
+                    statRerollLockSpdToggleRef.Get()
+                )
+                local stopTier = (function()
+                    local s = saved.statRerollStopTier
+                    if statRerollStopTierDropdownRef and type(statRerollStopTierDropdownRef.Get) == "function" then
+                        local _, v = statRerollStopTierDropdownRef.Get()
+                        if type(v) == "string" and #v > 0 then
+                            s = v
+                        end
+                    end
+                    if getgenv and type(getgenv().BonusChestStatRerollStopTier) == "string" then
+                        s = getgenv().BonusChestStatRerollStopTier
+                    end
+                    return normalizeStatTierToken(s)
+                end)()
+                local preUnit = resolveStatRerollUnit(unitFilter)
+                if preUnit and statRerollReachedTargetTier(preUnit, lockedList, stopTier) then
+                    statRerollToggleRef.Set(false)
+                    Win:Notify("Stat reroll", ("Reached target tier %s — auto stopped."):format(stopTier), 4, "success")
+                    persistAll()
+                    break
+                end
                 local _, mode = statRerollModeDropdownRef.Get()
                 local modeStr = (mode == "better" and "better") or "always"
+                local lockAtk = statRerollLockAtkToggleRef.Get()
+                local lockHp = statRerollLockHpToggleRef.Get()
+                local lockCd = statRerollLockCdToggleRef.Get()
+                local lockSpd = statRerollLockSpdToggleRef.Get()
                 local ok, why = tryStatRerollOnce({
-                    unitNameFilter = (function()
-                        if statRerollUnitDropdownRef then
-                            local _, v = statRerollUnitDropdownRef.Get()
-                            if type(v) == "string" then
-                                return v
-                            end
-                        end
-                        return ""
-                    end)(),
-                    lockAtk = statRerollLockAtkToggleRef.Get(),
-                    lockHp = statRerollLockHpToggleRef.Get(),
-                    lockCd = statRerollLockCdToggleRef.Get(),
-                    lockSpd = statRerollLockSpdToggleRef.Get(),
+                    unitNameFilter = unitFilter,
+                    lockAtk = lockAtk,
+                    lockHp = lockHp,
+                    lockCd = lockCd,
+                    lockSpd = lockSpd,
                     mode = modeStr,
                 })
+                task.defer(refreshSelectedRerollUnitStats)
                 if ok then
                     rolls = rolls + 1
+                end
+                local postUnit = resolveStatRerollUnit(unitFilter)
+                if postUnit and statRerollReachedTargetTier(postUnit, lockedList, stopTier) then
+                    statRerollToggleRef.Set(false)
+                    Win:Notify("Stat reroll", ("Reached target tier %s — auto stopped."):format(stopTier), 4, "success")
+                    persistAll()
+                    break
                 end
                 if why == "no_module" or why == "no_unit" or why == "no_match" or why == "all_locked" then
                     Win:Status("Stat reroll: " .. tostring(why))
@@ -5663,6 +6009,27 @@ TRoll:Section("Trait reroll")
 TRoll:Label("UnitUpgrades.BuyTraitReroll + TraitRerollAction (or RerollAction). Same unit dropdown pattern as stat reroll.")
 
 wireTraitRerollUnitDropdown(TRoll)
+traitRerollUnitInfoRef = TRoll:Label("Trait target: Select a unit to view current stats/trait.")
+
+local traitKeepOpts = buildTraitKeepOptions()
+traitKeepMultiRef = TRoll:MultiSelect(
+    "Keep Traits (multi-select)",
+    "All traits from Systems.Units.Traits dump/module. In 'until goal', only these are accepted.",
+    traitKeepOpts,
+    getTraitOptionDefaultIndices(traitKeepOpts, saved.traitRerollGoals or ""),
+    function(_, values)
+        local merged = buildTraitGoalCsvFromInputs(
+            traitRerollGoalsInputRef and traitRerollGoalsInputRef.Get and traitRerollGoalsInputRef.Get() or "",
+            values
+        )
+        if traitRerollGoalsInputRef and type(traitRerollGoalsInputRef.Set) == "function" then
+            pcall(function()
+                traitRerollGoalsInputRef.Set(merged)
+            end)
+        end
+        persistAll()
+    end
+)
 
 traitRerollGoalsInputRef = TRoll:Input(
     "Goal traits (comma)",
@@ -5670,6 +6037,12 @@ traitRerollGoalsInputRef = TRoll:Input(
     "",
     saved.traitRerollGoals or "",
     function()
+        if traitKeepMultiRef and type(traitKeepMultiRef.Set) == "function" then
+            local idx = getTraitOptionDefaultIndices(traitKeepOpts, traitRerollGoalsInputRef.Get())
+            pcall(function()
+                traitKeepMultiRef.Set(idx)
+            end)
+        end
         persistAll()
     end
 )
@@ -5717,7 +6090,7 @@ traitRerollDelayInputRef = TRoll:Input(
 )
 
 TRoll:Button("🧬", "Reroll trait once", "BuyTraitReroll then UseNew or KeepCurrent", nil, function()
-    task.spawn(function()
+    spawnTracked(function()
         local _, mode = traitRerollModeDropdownRef.Get()
         local modeStr = (mode == "always_apply" and "always_apply") or "until_goal"
         local ok, why = tryTraitRerollOnce({
@@ -5730,10 +6103,18 @@ TRoll:Button("🧬", "Reroll trait once", "BuyTraitReroll then UseNew or KeepCur
                 end
                 return ""
             end)(),
-            goalCsv = traitRerollGoalsInputRef.Get(),
+            goalCsv = getTraitGoalCsvFromUi(),
+            goalList = (function()
+                if traitKeepMultiRef and type(traitKeepMultiRef.Get) == "function" then
+                    local _, vals = traitKeepMultiRef.Get()
+                    return vals
+                end
+                return nil
+            end)(),
             mode = modeStr,
             skipAnim = traitRerollSkipAnimToggleRef.Get(),
         })
+        task.defer(refreshSelectedRerollUnitStats)
         if why == "no_module" then
             Win:Notify("Trait reroll", "UnitUpgrades has no BuyTraitReroll / confirm API.", 5, "error")
         elseif why == "no_unit" then
@@ -5769,7 +6150,7 @@ traitRerollToggleRef = TRoll:Toggle("Auto trait reroll", "Until goal: stops when
         if traitRerollSkipAnimToggleRef and traitRerollSkipAnimToggleRef.Get() then
             trySetSkipTraitRerollAnim(true)
         end
-        task.spawn(function()
+        spawnTracked(function()
             local rolls = 0
             while g == G.traitReroll and bonusChestUiAlive(UI_RUN_GEN) do
                 local maxR = tonumber(traitRerollMaxRollsInputRef.Get()) or saved.traitRerollMaxRolls
@@ -5795,10 +6176,18 @@ traitRerollToggleRef = TRoll:Toggle("Auto trait reroll", "Until goal: stops when
                         end
                         return ""
                     end)(),
-                    goalCsv = traitRerollGoalsInputRef.Get(),
+                    goalCsv = getTraitGoalCsvFromUi(),
+                    goalList = (function()
+                        if traitKeepMultiRef and type(traitKeepMultiRef.Get) == "function" then
+                            local _, vals = traitKeepMultiRef.Get()
+                            return vals
+                        end
+                        return nil
+                    end)(),
                     mode = modeStr,
                     skipAnim = traitRerollSkipAnimToggleRef and traitRerollSkipAnimToggleRef.Get(),
                 })
+                task.defer(refreshSelectedRerollUnitStats)
                 if ok then
                     rolls = rolls + 1
                 end
@@ -5854,6 +6243,7 @@ refreshProfileUnitDropdowns = function()
         local _, v = fuseSac3DropdownRef.Get()
         fuseSac3DropdownRef.Refresh(sacOpts, v)
     end
+    task.defer(refreshSelectedRerollUnitStats)
 end
 
 local TRewards = Win:Tab("✨", "Rewards")
@@ -5871,7 +6261,7 @@ claimQuestsIntervalInputRef = TRewards:Input(
 )
 
 TRewards:Button("📜", "Claim all now", "Achievements + Daily claim pass", nil, function()
-    task.spawn(function()
+    spawnTracked(function()
         local ok, why = tryClaimAchievementsAndDailyOnce({ achievements = true, daily = true })
         if why == "no_api" then
             Win:Notify("Quests", "No Quests module or QuestEvent — game API may differ.", 5, "warning")
@@ -5890,7 +6280,7 @@ local function restartQuestAutoClaimLoop()
         Win:Status("Auto quest claim OFF")
         return
     end
-    task.spawn(function()
+    spawnTracked(function()
         while g == G.questClaim and bonusChestUiAlive(UI_RUN_GEN) do
             local a = claimAchievementsToggleRef and claimAchievementsToggleRef.Get()
             local d = claimDailyToggleRef and claimDailyToggleRef.Get()
@@ -5928,7 +6318,7 @@ TRewards:Section("Promo codes")
 TRewards:Label("PromoCodes.ClaimCode · set getgenv().BonusChestPromoCodes or PROMO_CODES_EDIT in script.")
 
 TRewards:Button("🎁", "Redeem all now", "Fire every code once (server may reject duplicates)", nil, function()
-    task.spawn(function()
+    spawnTracked(function()
         local ok, why = redeemPromoCodesOnce()
         if why == "no_remote" then
             Win:Notify("Codes", "PromoCodes.ClaimCode not found.", 4, "error")
@@ -5944,7 +6334,7 @@ redeemToggleRef = TRewards:Toggle("Auto redeem codes", "Retry full list every 2 
     G.redeem = G.redeem + 1
     local myRedeem = G.redeem
     if on then
-        task.spawn(function()
+        spawnTracked(function()
             while myRedeem == G.redeem and bonusChestUiAlive(UI_RUN_GEN) do
                 local ok, why = redeemPromoCodesOnce()
                 if why == "no_remote" then
@@ -6023,9 +6413,7 @@ local function wirePlayerTab()
 end
 wirePlayerTab()
 
--- Chat tab: cross-server chat with Discord-style features (reply, reactions, DM, mute, ESP, etc.)
-Win:ChatTab()
-
+-- Restore toggles from saved config (Toggle:Set fires callback — starts/stops loops to match JSON)
 task.defer(function()
     hookSummonPackOpenedAutoSell()
     setAutoSellRarityInGame(3, saved.autoSellRare)
@@ -6102,10 +6490,11 @@ task.defer(function()
     if playerTabRefs.infiniteJump and type(playerTabRefs.infiniteJump.Set) == "function" then
         playerTabRefs.infiniteJump.Set(saved.playerInfiniteJump == true)
     end
-    task.spawn(function()
+    spawnTracked(function()
         task.wait(1.5)
         pcall(refreshProfileUnitDropdowns)
     end)
+    task.defer(refreshSelectedRerollUnitStats)
     Win:Status(("Summon Heroes · toggles restored from latest save · %s"):format(CONFIG_FILE))
     -- This runs once per script execution. If the console floods, the whole script is re-running (executor auto-exec, etc.) — not a loop here. Optional: getgenv().BonusChestVerboseInit = true to print every run.
     local _msg = ("[AutoBonusChests] Save/load OK · GUI cleaned · toggles synced from %s"):format(CONFIG_FILE)
