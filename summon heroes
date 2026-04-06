@@ -4539,9 +4539,6 @@ do
     pcall(function()
         _G.NexusLib_PresenceGen = (_G.NexusLib_PresenceGen or 0) + 1
     end)
-    pcall(function()
-        _G.NexusLib_ChatGen = (_G.NexusLib_ChatGen or 0) + 1
-    end)
     local pg = LP and LP:FindFirstChild("PlayerGui")
     if pg then
         for _, ch in ipairs(pg:GetChildren()) do
