@@ -2927,7 +2927,10 @@ end
 local DUNGEON_STAGE_OPTIONS = {
     { text = "1 · Food Dungeon", value = 1 },
     { text = "2 · Fusion Dungeon", value = 2 },
-    { text = "3 · Mythic Dungeon", value = 3 },
+    { text = "3 · Gems Dungeon I", value = 3 },
+    { text = "4 · Mythic Dungeon I", value = 4 },
+    { text = "5 · Mythic Dungeon II", value = 5 },
+    { text = "6 · Gems Dungeon II", value = 6 },
 }
 local DUNGEON_STAGE_INFO_BY_KEY = {}
 local DUNGEON_STAGES_BY_KEY = (function()
