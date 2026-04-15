@@ -7,6 +7,51 @@ local PROMO_CODES_EDIT = {}
 local CONFIG_FILE = (getgenv and type(getgenv().BonusChestConfigPath) == "string" and getgenv().BonusChestConfigPath)
     or "BonusChests_config.json"
 
+function getSummonHeroesDiscordInvite()
+    local g = getgenv and getgenv()
+    local url = g and g.BonusChestDiscordInvite
+    if type(url) == "string" then
+        url = (url:match("^%s*(.-)%s*$") or "")
+        if #url > 0 then
+            return url
+        end
+    end
+    return "https://discord.gg/ErGUHtVK"
+end
+
+function copySummonHeroesDiscordInvite()
+    local url = getSummonHeroesDiscordInvite()
+    local fns = {
+        setclipboard,
+        toclipboard,
+        (getgenv and getgenv().setclipboard),
+        (getgenv and getgenv().toclipboard),
+    }
+    for _, fn in ipairs(fns) do
+        if type(fn) == "function" then
+            local ok = pcall(fn, url)
+            if ok then
+                return true, url
+            end
+        end
+    end
+    return false, url
+end
+
+function openSummonHeroesDiscordInvite()
+    local url = getSummonHeroesDiscordInvite()
+    if syn and type(syn.openUrl) == "function" then
+        local ok = pcall(syn.openUrl, url)
+        if ok then
+            return true, url
+        end
+    end
+    local ok = pcall(function()
+        return game:GetService("GuiService"):OpenBrowserWindow(url)
+    end)
+    return ok, url
+end
+
 local function loadConfig()
     local defaults = {
         autoCollect = false,
@@ -268,11 +313,21 @@ end
 local SCRIPT_SOURCE_URL = (getgenv and getgenv().BonusChestScriptUrl)
     or "https://raw.githubusercontent.com/headshot7535-png/Summon-Heros-/main/summon%20heroes"
 
-local function tryQueueOnTeleport()
+local QUEUE_DEDUP_SEC = 1.25
+local function tryQueueOnTeleport(reason, forceQueue)
     if getgenv and getgenv().BonusChestNoQueue == true then
         return false, "skipped"
     end
     local code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
+    local st = ((getgenv and getgenv()) or _G)
+    local now = os.clock()
+    if forceQueue ~= true then
+        local lastAt = tonumber(st._BonusChestLastQueueAt) or 0
+        local lastCode = st._BonusChestLastQueueCode
+        if type(lastCode) == "string" and lastCode == code and (now - lastAt) < QUEUE_DEDUP_SEC then
+            return true, "dedup"
+        end
+    end
     local candidates = {
         typeof(queue_on_teleport) == "function" and queue_on_teleport,
         typeof(syn) == "table" and syn.queue_on_teleport,
@@ -284,6 +339,9 @@ local function tryQueueOnTeleport()
         if type(fn) == "function" then
             local ok = pcall(fn, code)
             if ok then
+                st._BonusChestLastQueueAt = now
+                st._BonusChestLastQueueCode = code
+                st._BonusChestLastQueueReason = tostring(reason or "generic")
                 return true, nil
             end
         end
@@ -396,7 +454,7 @@ local function armBonusChestQueue()
     if saved.queueOnTeleport == false then
         return false, "off"
     end
-    return tryQueueOnTeleport()
+    return tryQueueOnTeleport("arm")
 end
 
 pcall(function()
@@ -426,14 +484,7 @@ pcall(function()
         if getgenv and getgenv().BonusChestNoQueue == true then
             return
         end
-        local code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
-        if typeof(queue_on_teleport) == "function" then
-            pcall(function()
-                queue_on_teleport(code)
-            end)
-        else
-            tryQueueOnTeleport()
-        end
+        tryQueueOnTeleport("teleport_requested")
     end))
 end)
 
@@ -543,30 +594,38 @@ end
 
 local ROUND_END_NEXT_NAMES = { "NextStageButton", "NextStage", "NextMapButton", "NextButton" }
 local ROUND_END_RETRY_NAMES = { "RestartButton", "RetryStage", "RetryButton", "Retry" }
+local ROUND_END_NEXT_SET, ROUND_END_RETRY_SET = {}, {}
+for _, n in ipairs(ROUND_END_NEXT_NAMES) do
+    ROUND_END_NEXT_SET[n] = true
+end
+for _, n in ipairs(ROUND_END_RETRY_NAMES) do
+    ROUND_END_RETRY_SET[n] = true
+end
+local _roundEndVoteVisibleCache = { t = 0, next = false, retry = false }
+local ROUND_END_VOTE_CACHE_SEC = 0.12
 
 --- One PlayerGui scan for both vote buttons (stage vote + fireRoundEndVote call this; avoids 4–8 full scans per tick).
 local function getRoundEndVoteButtonsVisible()
+    local now = os.clock()
+    if (now - _roundEndVoteVisibleCache.t) < ROUND_END_VOTE_CACHE_SEC then
+        return _roundEndVoteVisibleCache.next, _roundEndVoteVisibleCache.retry
+    end
     local pg = LP:FindFirstChild("PlayerGui")
     if not pg then
+        _roundEndVoteVisibleCache = { t = now, next = false, retry = false }
         return false, false
-    end
-    local nextSet, retrySet = {}, {}
-    for _, n in ipairs(ROUND_END_NEXT_NAMES) do
-        nextSet[n] = true
-    end
-    for _, n in ipairs(ROUND_END_RETRY_NAMES) do
-        retrySet[n] = true
     end
     local nextHit, retryHit = false, false
     for _, d in ipairs(pg:GetDescendants()) do
-        if d:IsA("GuiObject") and (nextSet[d.Name] or retrySet[d.Name]) and guiObjectShownOnScreen(d) then
-            if nextSet[d.Name] then
+        if d:IsA("GuiObject") and (ROUND_END_NEXT_SET[d.Name] or ROUND_END_RETRY_SET[d.Name]) and guiObjectShownOnScreen(d) then
+            if ROUND_END_NEXT_SET[d.Name] then
                 nextHit = true
             end
-            if retrySet[d.Name] then
+            if ROUND_END_RETRY_SET[d.Name] then
                 retryHit = true
             end
             if nextHit and retryHit then
+                _roundEndVoteVisibleCache = { t = now, next = true, retry = true }
                 return true, true
             end
         elseif not nextHit or not retryHit then
@@ -597,6 +656,7 @@ local function getRoundEndVoteButtonsVisible()
             break
         end
     end
+    _roundEndVoteVisibleCache = { t = now, next = nextHit, retry = retryHit }
     return nextHit, retryHit
 end
 
@@ -637,7 +697,27 @@ local function getEquippedFolder()
     return profile and profile:FindFirstChild("Equipped")
 end
 
-local function unitModelForEquippedSlot(slot)
+local function buildOwnedUnitBySlotMap()
+    local out = {}
+    local units = workspace:FindFirstChild("Units")
+    if not units then
+        return out
+    end
+    for _, m in ipairs(units:GetChildren()) do
+        if m:IsA("Model") and m:GetAttribute("OwnerName") == LP.Name then
+            local ref = m:FindFirstChild("DataRef")
+            if ref and ref:IsA("ObjectValue") and ref.Value then
+                out[ref.Value] = m
+            end
+        end
+    end
+    return out
+end
+
+local function unitModelForEquippedSlot(slot, bySlotMap)
+    if bySlotMap and bySlotMap[slot] then
+        return bySlotMap[slot]
+    end
     local units = workspace:FindFirstChild("Units")
     if not units then
         return nil
@@ -654,11 +734,11 @@ local function unitModelForEquippedSlot(slot)
 end
 
 --- Matches server revive rule: only when no live spawned unit for that Equipped folder (DataRef + Humanoid.Health).
-local function isEquippedSlotDeadForRevive(slot)
+local function isEquippedSlotDeadForRevive(slot, bySlotMap)
     if not slot or not slot.Parent then
         return false
     end
-    local model = unitModelForEquippedSlot(slot)
+    local model = unitModelForEquippedSlot(slot, bySlotMap)
     if not model then
         if workspace:GetAttribute("RoundStarted") ~= true then
             return false
@@ -682,9 +762,10 @@ local function fireReviveAllSlots()
     if not eq then
         return false
     end
+    local bySlotMap = buildOwnedUnitBySlotMap()
     local any = false
     for _, slot in ipairs(eq:GetChildren()) do
-        if isEquippedSlotDeadForRevive(slot) then
+        if isEquippedSlotDeadForRevive(slot, bySlotMap) then
             any = true
             pcall(function()
                 ev:FireServer(slot)
@@ -3021,14 +3102,27 @@ local function guiButtonDisplaysStart(btn)
     return false
 end
 
+local _startButtonByScreenGuiCache = setmetatable({}, { __mode = "k" })
+local START_BUTTON_CACHE_SEC = 0.2
 local function findStartButtonInScreenGui(sg)
     if not sg or not sg:IsA("ScreenGui") then
         return nil
+    end
+    local now = os.clock()
+    local cache = _startButtonByScreenGuiCache[sg]
+    if cache and (now - cache.t) < START_BUTTON_CACHE_SEC then
+        if cache.v and cache.v.Parent and cache.v:IsA("GuiButton") and guiObjectShownOnScreen(cache.v) then
+            return cache.v
+        end
+        if cache.miss then
+            return nil
+        end
     end
     local fallback = nil
     for _, d in ipairs(sg:GetDescendants()) do
         if d:IsA("GuiButton") and guiObjectShownOnScreen(d) then
             if d.Name == "StartButton" then
+                _startButtonByScreenGuiCache[sg] = { t = now, v = d, miss = false }
                 return d
             end
             if not fallback then
@@ -3043,6 +3137,7 @@ local function findStartButtonInScreenGui(sg)
             end
         end
     end
+    _startButtonByScreenGuiCache[sg] = { t = now, v = fallback, miss = (fallback == nil) }
     return fallback
 end
 
@@ -3075,10 +3170,67 @@ local function findStartButtonInPlayerGui(preferScreenGui)
     return nil
 end
 
+local _visibleMapListsCache = { t = 0, list = nil }
+local MAP_LIST_CACHE_SEC = 0.2
+local function getVisibleMapLists()
+    local now = os.clock()
+    local c = _visibleMapListsCache
+    if c.list and (now - c.t) < MAP_LIST_CACHE_SEC then
+        return c.list
+    end
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then
+        _visibleMapListsCache = { t = now, list = {} }
+        return {}
+    end
+    local out = {}
+    for _, mapList in ipairs(pg:GetDescendants()) do
+        if mapList.Name == "MapList" and mapList:IsA("GuiObject") and guiObjectShownOnScreen(mapList) then
+            out[#out + 1] = mapList
+        end
+    end
+    _visibleMapListsCache = { t = now, list = out }
+    return out
+end
+
+local _holderMapRowsCache = setmetatable({}, { __mode = "k" })
+local HOLDER_MAP_ROWS_CACHE_SEC = 0.2
+local function getHolderMapRows(holder)
+    if not holder then
+        return {}
+    end
+    local now = os.clock()
+    local c = _holderMapRowsCache[holder]
+    if c and (now - c.t) < HOLDER_MAP_ROWS_CACHE_SEC then
+        return c.rows
+    end
+    local rows = {}
+    for _, row in ipairs(holder:GetChildren()) do
+        if row:IsA("GuiObject")
+            and row.Name ~= "UIPadding"
+            and row.Name ~= "UIListLayout"
+            and row.Name ~= "UIGridLayout"
+            and row.Name ~= "UIAspectRatioConstraint"
+            and not row.Name:match("^UI") then
+            rows[#rows + 1] = row
+        end
+    end
+    _holderMapRowsCache[holder] = { t = now, rows = rows }
+    return rows
+end
+
 --- Story MapSelect: one row per map key; rows do not use StageNum (RaidSelect does).
 -- Normalise a string for loose comparison (lowercase, strip spaces/punctuation).
+local _normaliseMapNameCache = {}
 local function normaliseMapName(s)
-    return tostring(s or ""):lower():gsub("[%s%-_]+", "")
+    local raw = tostring(s or "")
+    local hit = _normaliseMapNameCache[raw]
+    if hit ~= nil then
+        return hit
+    end
+    local out = raw:lower():gsub("[%s%-_]+", "")
+    _normaliseMapNameCache[raw] = out
+    return out
 end
 
 -- Map display text → WaveData key lookup (add entries as new maps release).
@@ -3093,14 +3245,26 @@ local DISPLAY_TO_WAVE_KEY = {
 }
 
 -- Collect ALL text from a GuiObject's TextLabels / TextButtons.
+local _rowDisplayTextCache = setmetatable({}, { __mode = "k" })
+local ROW_DISPLAY_TEXT_CACHE_SEC = 0.35
 local function rowDisplayText(obj)
+    if not obj or not obj.Parent then
+        return ""
+    end
+    local now = os.clock()
+    local cache = _rowDisplayTextCache[obj]
+    if cache and (now - cache.t) < ROW_DISPLAY_TEXT_CACHE_SEC then
+        return cache.v
+    end
     local parts = {}
     for _, d in ipairs(obj:GetDescendants()) do
         if (d:IsA("TextLabel") or d:IsA("TextButton")) and #(d.Text or "") > 0 then
             parts[#parts + 1] = d.Text
         end
     end
-    return table.concat(parts, " ")
+    local out = table.concat(parts, " ")
+    _rowDisplayTextCache[obj] = { t = now, v = out }
+    return out
 end
 
 -- Returns true if a map row's text content matches the given mapKey.
@@ -3122,60 +3286,63 @@ local function mapRowMatchesKey(row, mapKey)
 end
 
 local function findStoryMapRow(mapKey)
-    local pg = LP:FindFirstChild("PlayerGui")
-    if not pg then
-        return nil, nil
-    end
-    for _, mapList in ipairs(pg:GetDescendants()) do
-        if mapList.Name == "MapList" and mapList:IsA("GuiObject") and guiObjectShownOnScreen(mapList) then
-            local holder = mapListInnerList(mapList)
-            if holder then
-                -- First: fast exact-name hit
-                local exact = holder:FindFirstChild(mapKey)
-                if exact and exact:IsA("GuiObject") and exact:GetAttribute("StageNum") == nil then
-                    return mapList, exact
-                end
-                -- Second: iterate all rows and match by name OR text content
-                for _, row in ipairs(holder:GetChildren()) do
-                    if row:IsA("GuiObject") and row:GetAttribute("StageNum") == nil then
-                        local nm = row.Name
-                        -- skip layout/padding/utility elements
-                        if nm ~= "UIPadding" and nm ~= "UIListLayout" and nm ~= "UIGridLayout"
-                            and nm ~= "UIAspectRatioConstraint" and not nm:match("^UI") then
-                            if mapRowMatchesKey(row, mapKey) then
-                                return mapList, row
-                            end
-                        end
+    for _, mapList in ipairs(getVisibleMapLists()) do
+        local holder = mapListInnerList(mapList)
+        if holder then
+            local rows = getHolderMapRows(holder)
+            -- First: fast exact-name hit
+            local exact = holder:FindFirstChild(mapKey)
+            if exact and exact:IsA("GuiObject") and exact:GetAttribute("StageNum") == nil then
+                return mapList, exact
+            end
+            -- Second: iterate all rows and match by name OR text content
+            for _, row in ipairs(rows) do
+                if row:GetAttribute("StageNum") == nil then
+                    if mapRowMatchesKey(row, mapKey) then
+                        return mapList, row
                     end
                 end
-                -- Third: if only 1 non-UI child exists and map key is any story map, return it
-                -- (handles ComingSoonMap placeholder being the only visible row)
-                local validRows = {}
-                for _, row in ipairs(holder:GetChildren()) do
-                    if row:IsA("GuiObject") and row:GetAttribute("StageNum") == nil
-                        and not row.Name:match("^UI") then
-                        validRows[#validRows + 1] = row
-                    end
+            end
+            -- Third: if only 1 non-UI child exists and map key is any story map, return it
+            -- (handles ComingSoonMap placeholder being the only visible row)
+            local validRows = {}
+            for _, row in ipairs(rows) do
+                if row:GetAttribute("StageNum") == nil then
+                    validRows[#validRows + 1] = row
                 end
-                if #validRows == 1 then
-                    -- Only one row: treat it as the target map (player opened right UI)
-                    return mapList, validRows[1]
-                end
+            end
+            if #validRows == 1 then
+                -- Only one row: treat it as the target map (player opened right UI)
+                return mapList, validRows[1]
             end
         end
     end
     return nil, nil
 end
 
+local _stageListByScreenGuiCache = setmetatable({}, { __mode = "k" })
+local STAGE_LIST_CACHE_SEC = 0.2
 local function findStageListInScreenGui(sg)
     if not sg then
         return nil
     end
+    local now = os.clock()
+    local cache = _stageListByScreenGuiCache[sg]
+    if cache and (now - cache.t) < STAGE_LIST_CACHE_SEC then
+        if cache.v and cache.v.Parent and cache.v:IsA("GuiObject") and guiObjectShownOnScreen(cache.v) then
+            return cache.v
+        end
+        if cache.miss then
+            return nil
+        end
+    end
     for _, d in ipairs(sg:GetDescendants()) do
         if d.Name == "StageList" and d:IsA("GuiObject") and guiObjectShownOnScreen(d) then
+            _stageListByScreenGuiCache[sg] = { t = now, v = d, miss = false }
             return d
         end
     end
+    _stageListByScreenGuiCache[sg] = { t = now, v = nil, miss = true }
     return nil
 end
 
@@ -3356,18 +3523,12 @@ end
 
 --- RaidSelect: one row per raid stage; same Name (e.g. Dungeon) + attribute StageNum.
 local function findRaidMapRow(raidKey, stageNum)
-    local pg = LP:FindFirstChild("PlayerGui")
-    if not pg then
-        return nil, nil
-    end
-    for _, mapList in ipairs(pg:GetDescendants()) do
-        if mapList.Name == "MapList" and mapList:IsA("GuiObject") and guiObjectShownOnScreen(mapList) then
-            local holder = mapListInnerList(mapList)
-            if holder then
-                for _, ch in ipairs(holder:GetChildren()) do
-                    if ch.Name == raidKey and tonumber(ch:GetAttribute("StageNum")) == stageNum then
-                        return mapList, ch
-                    end
+    for _, mapList in ipairs(getVisibleMapLists()) do
+        local holder = mapListInnerList(mapList)
+        if holder then
+            for _, ch in ipairs(getHolderMapRows(holder)) do
+                if ch.Name == raidKey and tonumber(ch:GetAttribute("StageNum")) == stageNum then
+                    return mapList, ch
                 end
             end
         end
@@ -3415,9 +3576,15 @@ end
 --- Summon Heroes stores remotes as children of the CLIENT LocalScript,
 --- NOT in RS.Systems.Queue. We search broadly to handle both layouts.
 local _remoteCache = {}
+local _remoteMissCache = {}
+local REMOTE_MISS_CACHE_SEC = 1.5
 local function findRemoteAnywhere(name)
+    local now = os.clock()
     if _remoteCache[name] and _remoteCache[name].Parent then
         return _remoteCache[name]
+    end
+    if _remoteMissCache[name] and (now - _remoteMissCache[name]) < REMOTE_MISS_CACHE_SEC then
+        return nil
     end
     -- 1. RS.Systems.Queue (canonical script path)
     local sys = getSystemsFolder()
@@ -3425,12 +3592,16 @@ local function findRemoteAnywhere(name)
         local qf = sys:FindFirstChild("Queue")
         local r = qf and qf:FindFirstChild(name)
         if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
-            _remoteCache[name] = r; return r
+            _remoteCache[name] = r
+            _remoteMissCache[name] = nil
+            return r
         end
         -- Also check directly in Systems
         r = sys:FindFirstChild(name, true)
         if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
-            _remoteCache[name] = r; return r
+            _remoteCache[name] = r
+            _remoteMissCache[name] = nil
+            return r
         end
     end
     -- 2. CLIENT LocalScript children (Players.X.PlayerGui.CLIENT.LocalScript.X)
@@ -3442,14 +3613,18 @@ local function findRemoteAnywhere(name)
             if ls then
                 local r = ls:FindFirstChild(name)
                 if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
-                    _remoteCache[name] = r; return r
+                    _remoteCache[name] = r
+                    _remoteMissCache[name] = nil
+                    return r
                 end
                 -- Also check Remotes subfolder if present
                 local remFolder = ls:FindFirstChild("Remotes")
                 if remFolder then
                     r = remFolder:FindFirstChild(name)
                     if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
-                        _remoteCache[name] = r; return r
+                        _remoteCache[name] = r
+                        _remoteMissCache[name] = nil
+                        return r
                     end
                 end
             end
@@ -3458,7 +3633,9 @@ local function findRemoteAnywhere(name)
                 if ls2:IsA("LocalScript") or ls2:IsA("Script") then
                     local r = ls2:FindFirstChild(name)
                     if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent") or r:IsA("RemoteFunction")) then
-                        _remoteCache[name] = r; return r
+                        _remoteCache[name] = r
+                        _remoteMissCache[name] = nil
+                        return r
                     end
                 end
             end
@@ -3466,16 +3643,21 @@ local function findRemoteAnywhere(name)
         -- Broader PlayerGui descendant search
         for _, d in ipairs(pg:GetDescendants()) do
             if d.Name == name and (d:IsA("RemoteEvent") or d:IsA("UnreliableRemoteEvent") or d:IsA("RemoteFunction")) then
-                _remoteCache[name] = d; return d
+                _remoteCache[name] = d
+                _remoteMissCache[name] = nil
+                return d
             end
         end
     end
     -- 3. RS deep search
     for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
         if d.Name == name and (d:IsA("RemoteEvent") or d:IsA("UnreliableRemoteEvent") or d:IsA("RemoteFunction")) then
-            _remoteCache[name] = d; return d
+            _remoteCache[name] = d
+            _remoteMissCache[name] = nil
+            return d
         end
     end
+    _remoteMissCache[name] = now
     return nil
 end
 
@@ -4143,18 +4325,6 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
         -- Search preferred ScreenGui first, then all PlayerGui ScreenGuis
         local startBtn = findStartButtonInPlayerGui(sg)
         if not startBtn then
-            -- Broader search: any visible Start/Play button in PlayerGui
-            local pg3 = LP:FindFirstChild("PlayerGui")
-            if pg3 then
-                for _, sgAny in ipairs(pg3:GetDescendants()) do
-                    if sgAny:IsA("ScreenGui") and sgAny.Enabled then
-                        local b = findStartButtonInScreenGui(sgAny)
-                        if b then startBtn = b; break end
-                    end
-                end
-            end
-        end
-        if not startBtn then
             return false, "no_start"
         end
         guiActivate(startBtn)
@@ -4549,7 +4719,7 @@ do
             end
         end
     end
-    task.wait(0.15)
+    task.wait()
 end
 -- Re-read JSON from disk immediately before building UI (each re-execution uses latest save file).
 saved = loadConfig()
@@ -6349,6 +6519,20 @@ end)
 local TSystem = Win:Tab("⚙", "System")
 TSystem:Section("Session")
 TSystem:Label("Auto re-exec (AniPixels-style): queues on load + right before TeleportService. Not after full disconnect — use executor auto-exec.")
+TSystem:Section("Discord")
+TSystem:Label("Invite link for Summon Heroes users. Override with getgenv().BonusChestDiscordInvite.")
+TSystem:Button("💬", "Join Discord", "Opens discord.gg/ErGUHtVK in browser", nil, function()
+    local copied, url = copySummonHeroesDiscordInvite()
+    local opened = select(1, openSummonHeroesDiscordInvite())
+    if copied then
+        Win:Notify("Discord", "Discord link copied to clipboard!", 3, "success")
+    end
+    if not copied and not opened then
+        Win:Notify("Discord", "Could not open/copy automatically.", 5, "warning")
+    end
+    Win:Status("discord.gg/ErGUHtVK — link copied!")
+end)
+TSystem:Label("Invite: " .. getSummonHeroesDiscordInvite())
 
 local reexecQueued = false
 queueToggleRef = TSystem:Toggle(
@@ -6369,7 +6553,7 @@ queueToggleRef = TSystem:Toggle(
             getgenv().BonusChestNoQueue = nil
         end
         -- Queue immediately (saved may not reflect ON until persistAll runs)
-        local ok, why = tryQueueOnTeleport()
+        local ok, why = tryQueueOnTeleport("session_toggle_on", true)
         reexecQueued = ok
         if ok then
             Win:Status("Summon Heroes · will re-run on teleport")
