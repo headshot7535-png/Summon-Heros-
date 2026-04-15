@@ -2929,10 +2929,81 @@ local DUNGEON_STAGE_OPTIONS = {
     { text = "2 · Fusion Dungeon", value = 2 },
     { text = "3 · Mythic Dungeon", value = 3 },
 }
+local DUNGEON_STAGE_INFO_BY_KEY = {}
+local DUNGEON_STAGES_BY_KEY = (function()
+    local out = {}
+    local ok, waveData = pcall(function()
+        return require(game.ReplicatedStorage.Systems.Waves.WaveData)
+    end)
+    if ok and type(waveData) == "table" then
+        for key, data in pairs(waveData) do
+            if type(key) == "string" and type(data) == "table" and (data.IsDungeon or data.IsRaid) and type(data.Stages) == "table" then
+                local opts = {}
+                local info = {}
+                for idx, st in ipairs(data.Stages) do
+                    local stageName = (type(st) == "table" and (st.Title or st.Name)) or nil
+                    local levelReq = (type(st) == "table" and tonumber(st.Level)) or nil
+                    opts[#opts + 1] = {
+                        text = stageName and ("%d · %s"):format(idx, tostring(stageName)) or tostring(idx),
+                        value = idx,
+                    }
+                    if stageName and levelReq then
+                        info[idx] = ("Stage %d · %s · Level %d+"):format(idx, tostring(stageName), levelReq)
+                    elseif stageName then
+                        info[idx] = ("Stage %d · %s"):format(idx, tostring(stageName))
+                    elseif levelReq then
+                        info[idx] = ("Stage %d · Level %d+"):format(idx, levelReq)
+                    else
+                        info[idx] = ("Stage %d"):format(idx)
+                    end
+                end
+                if #opts > 0 then
+                    out[key] = opts
+                    DUNGEON_STAGE_INFO_BY_KEY[key] = info
+                end
+            end
+        end
+    end
+    return out
+end)()
 
-local function dungeonStageOptionIndex(n)
+local DUNGEON_RAID_OPTIONS = (function()
+    local ok, waveData = pcall(function()
+        return require(game.ReplicatedStorage.Systems.Waves.WaveData)
+    end)
+    if ok and type(waveData) == "table" then
+        local out = {}
+        for key, data in pairs(waveData) do
+            if type(data) == "table" and type(key) == "string" and (data.IsDungeon or data.IsRaid) then
+                out[#out + 1] = {
+                    text = ("%s [%s]"):format(tostring(data.Title or key), key),
+                    value = key,
+                    order = tonumber(data.Order) or 9999,
+                }
+            end
+        end
+        table.sort(out, function(a, b)
+            if a.order == b.order then
+                return tostring(a.value) < tostring(b.value)
+            end
+            return a.order < b.order
+        end)
+        if #out > 0 then
+            return out
+        end
+    end
+    return {
+        { text = "Dungeon [Dungeon]", value = "Dungeon" },
+    }
+end)()
+
+local function dungeonStageOptionIndex(n, opts)
+    opts = (type(opts) == "table" and #opts > 0) and opts or DUNGEON_STAGE_OPTIONS
+    if #opts < 1 then
+        return 1
+    end
     n = tonumber(n) or 1
-    return math.clamp(math.floor(n), 1, #DUNGEON_STAGE_OPTIONS)
+    return math.clamp(math.floor(n), 1, #opts)
 end
 
 local ROTATING_SHOP_OPTIONS = {
@@ -3917,7 +3988,7 @@ function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
     if not padModel then
         return false
     end
-    local gap = 0.6
+    local gap = 0.35
     if getgenv and type(getgenv().BonusChestSetQueueLaunchGap) == "number" then
         gap = math.clamp(getgenv().BonusChestSetQueueLaunchGap, 0.05, 3)
     end
@@ -3936,7 +4007,7 @@ function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
         if root and door then
             -- Teleport onto the door (4 studs above centre to avoid clipping)
             root.CFrame = door.CFrame + Vector3.new(0, 4, 0)
-            task.wait(0.15)   -- let server register the new position
+            task.wait(0.1)   -- let server register the new position
         else
             if not root then print("[SH] RequestEnterQueue: no HumanoidRootPart, skipping teleport") end
             if not door then print("[SH] RequestEnterQueue: no Door child found on padModel") end
@@ -3956,7 +4027,7 @@ function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
         else
             print("[SH] RequestEnterQueue pcall error:", success)
         end
-        task.wait(0.3)
+        task.wait(0.15)
     else
         print("[SH] RequestEnterQueue remote not found - proceeding anyway")
     end
@@ -4142,6 +4213,66 @@ function queueTeleportSkipDistance()
     return QUEUE_TELEPORT_SKIP_DIST
 end
 
+function queuePadOwnedByOther(slotModel)
+    if not slotModel or not slotModel.Parent then
+        return false, nil
+    end
+    local owner = slotModel:GetAttribute("OwnerName")
+    if type(owner) == "string" then
+        owner = (owner:match("^%s*(.-)%s*$") or "")
+        if #owner > 0 and owner ~= LP.Name then
+            return true, owner
+        end
+    end
+    return false, nil
+end
+
+function queuePadHasOtherPlayersNear(slotModel, radius)
+    if not slotModel or not slotModel.Parent then
+        return false, nil
+    end
+    radius = tonumber(radius) or 14
+    local main = getQueueVisualMainPart(slotModel)
+    local door = slotModel:FindFirstChild("Door", true)
+    if not main and not (door and door:IsA("BasePart")) then
+        return false, nil
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local ch = plr.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local hp = hrp.Position
+                local near = false
+                if main and (hp - main.Position).Magnitude <= radius then
+                    near = true
+                end
+                if not near and door and door:IsA("BasePart") and (hp - door.Position).Magnitude <= radius then
+                    near = true
+                end
+                if near then
+                    return true, plr.Name
+                end
+            end
+        end
+    end
+    return false, nil
+end
+
+function queuePadBusyByOther(slotModel, checkNearby)
+    local owned, owner = queuePadOwnedByOther(slotModel)
+    if owned then
+        return true, owner
+    end
+    if checkNearby ~= false then
+        local near, who = queuePadHasOtherPlayersNear(slotModel, getgenv and getgenv().BonusChestQueueBusyRadius)
+        if near then
+            return true, who
+        end
+    end
+    return false, nil
+end
+
 --- Lobby: Story pad (opens map UI) → map + stage → queue Door/Main → LaunchQueue / SetQueue → Start.
 function tryAutoStartStoryOnce(mapKey, stageNum)
     if type(mapKey) ~= "string" or #mapKey == 0 then
@@ -4163,8 +4294,12 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
         if not pad then
             return false, "no_pad"
         end
+        local busy, who = queuePadBusyByOther(pad, true)
+        if busy then
+            return false, "pad_busy:" .. tostring(who or "unknown")
+        end
         if teleportHrpToQueuePadMainWithOffset(pad) then
-            task.wait(0.5)
+            task.wait(0.24)
             if trySetQueueThenLaunchQueueForPadModel(pad, mapKey, stageNum) then
                 return true, nil
             end
@@ -4174,6 +4309,12 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
     end
 
     local slotInst = resolveStoryQueueLobbySlotInstance()
+    if slotInst then
+        local busy, who = queuePadBusyByOther(slotInst, true)
+        if busy then
+            return false, "pad_busy:" .. tostring(who or "unknown")
+        end
+    end
 
     if getgenv and getgenv().BonusChestFireBlueQueuePadPrompt == true then
         local pr = select(1, findQueuePadPromptAndModelByHue(true))
@@ -4203,8 +4344,11 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
                 if getgenv and type(getgenv().BonusChestStoryPadPromptUiWait) == "number" then
                     uiWait = getgenv().BonusChestStoryPadPromptUiWait
                 end
-                task.wait(math.clamp(uiWait, 0.5, 5))
-                mapList, mapEntry = findStoryMapRow(mapKey)
+                local deadline = os.clock() + math.clamp(uiWait, 0.5, 5)
+                repeat
+                    task.wait(0.1)
+                    mapList, mapEntry = findStoryMapRow(mapKey)
+                until (mapList and mapEntry) or os.clock() >= deadline
             end
         end
     end
@@ -4212,7 +4356,7 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
     -- Second TP attempt with forced snap in case first didn't register
     if not (mapList and mapEntry) and not (getgenv and getgenv().BonusChestStoryTeleportToPad == false) then
         tryTeleportToStoryPad(true)
-        task.wait(0.55)
+        task.wait(0.25)
         mapList, mapEntry = findStoryMapRow(mapKey)
     end
     if mapList and mapEntry then
@@ -4250,7 +4394,7 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
             return false, "stage_locked"
         end
         guiActivate(stageEntry:IsA("GuiButton") and stageEntry or stageEntry:FindFirstDescendantWhichIsA("GuiButton"))
-        task.wait(0.35)
+        task.wait(0.2)
 
         -- Party queue / LaunchQueue expects you at the slot (Visual + Door), not another pad snap after GUI picks.
         if slotInst and not (getgenv and getgenv().BonusChestStorySkipQueueDoorTeleport == true) then
@@ -4293,6 +4437,7 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
             end
         end
 
+        local remoteQueueOk = false
         if slotInst then
             local launchEv = resolveLaunchQueueRemote()
             local fired = false
@@ -4319,15 +4464,24 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
                     end
                     if okFire then
                         task.wait(0.12)
+                        remoteQueueOk = true
                     end
                 end
+            else
+                remoteQueueOk = true
             end
+        end
+
+        -- Queue module in dump handles LaunchQueue server-side directly; skip extra UI click when remote launch already succeeded.
+        local preferRemote = not (getgenv and getgenv().BonusChestPreferRemoteLaunch == false)
+        if preferRemote and remoteQueueOk then
+            return true, nil
         end
 
         -- Search preferred ScreenGui first, then all PlayerGui ScreenGuis
         local startBtn = findStartButtonInPlayerGui(sg)
         if not startBtn then
-            return false, "no_start"
+            return remoteQueueOk and true or false, remoteQueueOk and nil or "no_start"
         end
         guiActivate(startBtn)
         task.wait(0.12)
@@ -4356,8 +4510,12 @@ function tryAutoStartDungeonOnce(raidKey, stageNum)
         if not pad then
             return false, "no_pad"
         end
+        local busy, who = queuePadBusyByOther(pad, true)
+        if busy then
+            return false, "pad_busy:" .. tostring(who or "unknown")
+        end
         if teleportHrpToQueuePadMainWithOffset(pad) then
-            task.wait(0.8)
+            task.wait(0.3)
             if trySetQueueThenLaunchQueueForPadModel(pad, raidKey, stageNum) then
                 return true, nil
             end
@@ -4367,6 +4525,12 @@ function tryAutoStartDungeonOnce(raidKey, stageNum)
     end
 
     local dSlot = resolveDungeonQueueLobbySlotInstance()
+    if dSlot then
+        local busy, who = queuePadBusyByOther(dSlot, true)
+        if busy then
+            return false, "pad_busy:" .. tostring(who or "unknown")
+        end
+    end
 
     if getgenv and getgenv().BonusChestFireRedQueuePadPrompt == true then
         local pr = select(1, findQueuePadPromptAndModelByHue(false))
@@ -4401,6 +4565,17 @@ function tryAutoStartDungeonOnce(raidKey, stageNum)
 
     local mapList, row = findRaidMapRow(raidKey, stageNum)
     if not mapList or not row then
+        local pr = select(1, findQueuePadPromptAndModelByHue(false))
+        if pr then
+            tryTeleportHumanoidToQueuePadPrompt(pr)
+            local deadline = os.clock() + 1.5
+            repeat
+                task.wait(0.1)
+                mapList, row = findRaidMapRow(raidKey, stageNum)
+            until (mapList and row) or os.clock() >= deadline
+        end
+    end
+    if not mapList or not row then
         return false, "no_ui"
     end
 
@@ -4428,11 +4603,50 @@ function tryAutoStartDungeonOnce(raidKey, stageNum)
         return false, "map_locked"
     end
     guiActivate(row:IsA("GuiButton") and row or row:FindFirstDescendantWhichIsA("GuiButton"))
-    task.wait(0.2)
+    task.wait(0.12)
+
+    local remoteQueueOk = false
+    if dSlot then
+        local launchEv = resolveLaunchQueueRemote()
+        local fired = false
+        if launchEv and not (getgenv and getgenv().BonusChestSkipLaunchQueue == true) then
+            fired = select(1, pcall(function()
+                launchEv:FireServer(dSlot)
+            end))
+            if fired then
+                task.wait(0.08)
+                remoteQueueOk = true
+            end
+        end
+        if not fired then
+            local setEv = resolveSetQueueRemote()
+            if setEv then
+                local okFire
+                if setEv:IsA("RemoteFunction") then
+                    okFire = select(1, pcall(function()
+                        setEv:InvokeServer(dSlot, raidKey, stageNum)
+                    end))
+                else
+                    okFire = select(1, pcall(function()
+                        setEv:FireServer(dSlot, raidKey, stageNum)
+                    end))
+                end
+                if okFire then
+                    task.wait(0.08)
+                    remoteQueueOk = true
+                end
+            end
+        end
+    end
+
+    local preferRemote = not (getgenv and getgenv().BonusChestPreferRemoteLaunch == false)
+    if preferRemote and remoteQueueOk then
+        return true, nil
+    end
 
     local startBtn = findStartButtonInPlayerGui(sg)
     if not startBtn then
-        return false, "no_start"
+        return remoteQueueOk and true or false, remoteQueueOk and nil or "no_start"
     end
     guiActivate(startBtn)
     task.wait(0.1)
@@ -4884,7 +5098,7 @@ local function persistAllWriteNow()
     end
     local raidKey = saved.dungeonRaidKey
     if dungeonRaidKeyInputRef then
-        local s = dungeonRaidKeyInputRef.Get()
+        local _, s = dungeonRaidKeyInputRef.Get()
         if type(s) == "string" then
             s = (s:match("^%s*(.-)%s*$") or "")
             if #s > 0 then
@@ -5187,6 +5401,8 @@ local G = {
     lastStoryNoStart = 0,
     lastStoryStartNotify = 0,
     lastDungeonLock = 0,
+    lastStoryPadBusy = 0,
+    lastDungeonPadBusy = 0,
     lastShopHint = 0,
     lastFuseHint = 0,
 }
@@ -5360,6 +5576,16 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "TP to pad → map/stag
                         G.lastStoryLock = t
                         Win:Status("Story: locked — clear requirement or pick another map/stage")
                     end
+                elseif type(why) == "string" and string.sub(why, 1, 9) == "pad_busy:" then
+                    local t = os.clock()
+                    if t - G.lastStoryPadBusy > 2 then
+                        G.lastStoryPadBusy = t
+                        local who = string.sub(why, 10)
+                        if type(who) ~= "string" or #who == 0 then
+                            who = "another player"
+                        end
+                        Win:Status(("Story: queue pad busy (%s) — waiting"):format(who))
+                    end
                 elseif why == "no_ui" then
                     local t = os.clock()
                     if t - G.lastStoryPadTp > 2.5 then
@@ -5389,27 +5615,82 @@ storyStartToggleRef = TBattle:Toggle("Auto start story", "TP to pad → map/stag
 end)
 
 TBattle:Section("Dungeons (raid select)")
-TBattle:Label("RaidSelect: pick the row for that dungeon stage, then Start. Default raid key is Dungeon.")
+TBattle:Label("RaidSelect: choose dungeon from live WaveData (all IsDungeon/IsRaid entries). Stage list updates to selected key.")
 
-dungeonRaidKeyInputRef = TBattle:Input(
-    "Raid WaveData key",
-    "Usually Dungeon (IsRaid maps in RaidSelect)",
-    "Dungeon",
-    saved.dungeonRaidKey,
+local dungeonStageInfoRef
+local function refreshDungeonStageInfoLabel()
+    if not dungeonStageInfoRef or type(dungeonStageInfoRef.Set) ~= "function" then
+        return
+    end
+    local raidKey = saved.dungeonRaidKey
+    if dungeonRaidKeyInputRef and type(dungeonRaidKeyInputRef.Get) == "function" then
+        local _, k = dungeonRaidKeyInputRef.Get()
+        if type(k) == "string" and #k > 0 then
+            raidKey = k
+        end
+    end
+    local stageNum = saved.dungeonStage
+    if dungeonStageDropdownRef and type(dungeonStageDropdownRef.Get) == "function" then
+        local _, st = dungeonStageDropdownRef.Get()
+        if type(st) == "number" then
+            stageNum = st
+        end
+    end
+    stageNum = math.max(1, math.floor(tonumber(stageNum) or 1))
+    local infoByStage = DUNGEON_STAGE_INFO_BY_KEY[raidKey]
+    local line = infoByStage and infoByStage[stageNum]
+    if type(line) == "string" and #line > 0 then
+        dungeonStageInfoRef.Set("Selected: " .. line)
+    else
+        dungeonStageInfoRef.Set(("Selected: %s · Stage %d"):format(tostring(raidKey), stageNum))
+    end
+end
+
+dungeonRaidKeyInputRef = TBattle:Dropdown(
+    "Dungeon / Raid key",
+    "Loaded from WaveData entries flagged IsDungeon or IsRaid",
+    DUNGEON_RAID_OPTIONS,
+    dropdownIndexForSavedValue(DUNGEON_RAID_OPTIONS, saved.dungeonRaidKey),
     function()
+        if dungeonRaidKeyInputRef and dungeonStageDropdownRef and type(dungeonStageDropdownRef.Refresh) == "function" then
+            local _, raidKeySel = dungeonRaidKeyInputRef.Get()
+            local opts = DUNGEON_STAGES_BY_KEY[type(raidKeySel) == "string" and raidKeySel or saved.dungeonRaidKey] or DUNGEON_STAGE_OPTIONS
+            local targetStage = saved.dungeonStage
+            if dungeonStageDropdownRef and type(dungeonStageDropdownRef.Get) == "function" then
+                local _, curStage = dungeonStageDropdownRef.Get()
+                if type(curStage) == "number" then
+                    targetStage = curStage
+                end
+            end
+            targetStage = math.clamp(math.floor(tonumber(targetStage) or 1), 1, math.max(1, #opts))
+            pcall(function()
+                dungeonStageDropdownRef.Refresh(opts, targetStage)
+            end)
+        end
+        task.defer(refreshDungeonStageInfoLabel)
         persistAll()
     end
 )
 
 dungeonStageDropdownRef = TBattle:Dropdown(
     "Dungeon stage",
-    "Matches MapList row StageNum attribute",
-    DUNGEON_STAGE_OPTIONS,
-    dungeonStageOptionIndex(saved.dungeonStage),
+    "Loaded from selected dungeon's WaveData.Stages",
+    DUNGEON_STAGES_BY_KEY[saved.dungeonRaidKey] or DUNGEON_STAGE_OPTIONS,
+    dungeonStageOptionIndex(saved.dungeonStage, DUNGEON_STAGES_BY_KEY[saved.dungeonRaidKey] or DUNGEON_STAGE_OPTIONS),
     function()
+        task.defer(refreshDungeonStageInfoLabel)
         persistAll()
     end
 )
+pcall(function()
+    if dungeonRaidKeyInputRef and dungeonStageDropdownRef and type(dungeonStageDropdownRef.Refresh) == "function" then
+        local _, raidKeySel = dungeonRaidKeyInputRef.Get()
+        local opts = DUNGEON_STAGES_BY_KEY[type(raidKeySel) == "string" and raidKeySel or saved.dungeonRaidKey] or DUNGEON_STAGE_OPTIONS
+        dungeonStageDropdownRef.Refresh(opts, math.clamp(math.floor(tonumber(saved.dungeonStage) or 1), 1, math.max(1, #opts)))
+    end
+end)
+dungeonStageInfoRef = TBattle:Label("Selected: loading dungeon stage info...")
+task.defer(refreshDungeonStageInfoLabel)
 
 dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main queue + Door, then raid UI (~0.55s)", saved.autoStartDungeon, function(on)
     G.dungeon = G.dungeon + 1
@@ -5422,7 +5703,7 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
                     raidKey = getgenv().BonusChestDungeonRaidKey
                 end
                 if dungeonRaidKeyInputRef then
-                    local s = dungeonRaidKeyInputRef.Get()
+                    local _, s = dungeonRaidKeyInputRef.Get()
                     if type(s) == "string" then
                         s = (s:match("^%s*(.-)%s*$") or "")
                         if #s > 0 then
@@ -5448,6 +5729,16 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
                     if t - G.lastDungeonLock > 4 then
                         G.lastDungeonLock = t
                         Win:Status("Dungeon: row locked (level / hourly limit) — change stage or wait")
+                    end
+                elseif type(why) == "string" and string.sub(why, 1, 9) == "pad_busy:" then
+                    local t = os.clock()
+                    if t - G.lastDungeonPadBusy > 2 then
+                        G.lastDungeonPadBusy = t
+                        local who = string.sub(why, 10)
+                        if type(who) ~= "string" or #who == 0 then
+                            who = "another player"
+                        end
+                        Win:Status(("Dungeon: queue pad busy (%s) — waiting"):format(who))
                     end
                 end
                 task.wait(0.55)
