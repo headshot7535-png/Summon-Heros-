@@ -3664,25 +3664,25 @@ local function findRemoteAnywhere(name)
 end
 
 --- LaunchQueue:FireServer(queueModel)
-local function resolveLaunchQueueRemote()
+function resolveLaunchQueueRemote()
     return findRemoteAnywhere("LaunchQueue")
 end
 
 --- SetQueue:FireServer(queueSlot, mapKey, stageNum)
-local function resolveSetQueueRemote()
+function resolveSetQueueRemote()
     return findRemoteAnywhere("SetQueue")
 end
 
 --- RequestEnterQueue:InvokeServer(queueSlot) → (success, needMapSelect, errorMsg)
 --- Server validates queue membership; must be called before SetQueue/LaunchQueue will act.
-local function resolveRequestEnterQueueRemote()
+function resolveRequestEnterQueueRemote()
     return findRemoteAnywhere("RequestEnterQueue")
 end
 
 local _lobbyMapCache = { t = 0, m = nil, miss = false }
 local LOBBY_MAP_CACHE_SEC = 4.0
 
-local function findLobbyMapWithQueues()
+function findLobbyMapWithQueues()
     local now = os.clock()
     local c = _lobbyMapCache
     if (now - c.t) < LOBBY_MAP_CACHE_SEC then
@@ -3709,7 +3709,7 @@ local function findLobbyMapWithQueues()
     return nil
 end
 
-local function getQueueVisualMainPart(queueModel)
+function getQueueVisualMainPart(queueModel)
     if not queueModel then
         return nil
     end
@@ -3725,7 +3725,7 @@ local function getQueueVisualMainPart(queueModel)
 end
 
 --- Blue Neon story marker (~110,170,255); red Persimmon dungeon (~255,92,71).
-local function visualMainLooksLikeStoryQueue(main)
+function visualMainLooksLikeStoryQueue(main)
     if not main or not main:IsA("BasePart") then
         return false
     end
@@ -3739,7 +3739,7 @@ local function visualMainLooksLikeStoryQueue(main)
     return b >= 130 and b > r + 25 and b > g - 15
 end
 
-local function visualMainLooksLikeDungeonQueue(main)
+function visualMainLooksLikeDungeonQueue(main)
     if not main or not main:IsA("BasePart") then
         return false
     end
@@ -3753,7 +3753,7 @@ local function visualMainLooksLikeDungeonQueue(main)
     return r >= 170 and r > b + 25 and r > g * 0.85
 end
 
-local function findQueueModelByVisualMainHue(queues, wantStory)
+function findQueueModelByVisualMainHue(queues, wantStory)
     if not queues then
         return nil
     end
@@ -3771,13 +3771,13 @@ local function findQueueModelByVisualMainHue(queues, wantStory)
     return nil
 end
 
-local function getLobbyQueuesFolder()
+function getLobbyQueuesFolder()
     local lm = findLobbyMapWithQueues()
     return lm and lm:FindFirstChild("Queues")
 end
 
 --- LobbyMap.Queues: ProximityPrompt on blue story or red dungeon Visual.Main or Door (same hue rules as resolve*Queue).
-local function findQueuePadPromptAndModelByHue(wantStory)
+function findQueuePadPromptAndModelByHue(wantStory)
     local queues = getLobbyQueuesFolder()
     if not queues then
         return nil, nil
@@ -3804,7 +3804,7 @@ local function findQueuePadPromptAndModelByHue(wantStory)
 end
 
 --- Tr. Blue / RGB(110,170,255) or hue fallback — matches LobbyMap.Queues story slot.
-local function queueMainMatchesBlueStoryLobbyColor(main)
+function queueMainMatchesBlueStoryLobbyColor(main)
     if not main or not main:IsA("BasePart") then
         return false
     end
@@ -3827,7 +3827,7 @@ local function queueMainMatchesBlueStoryLobbyColor(main)
 end
 
 --- Persimmon / RGB(255,92,71) or hue fallback — dungeon slot.
-local function queueMainMatchesRedDungeonLobbyColor(main)
+function queueMainMatchesRedDungeonLobbyColor(main)
     if not main or not main:IsA("BasePart") then
         return false
     end
@@ -3849,7 +3849,7 @@ local function queueMainMatchesRedDungeonLobbyColor(main)
     return visualMainLooksLikeDungeonQueue(main)
 end
 
-local function getStoryQueuePadModelByLobbyColor()
+function getStoryQueuePadModelByLobbyColor()
     local queues = getLobbyQueuesFolder()
     if not queues then
         return nil
@@ -3865,7 +3865,7 @@ local function getStoryQueuePadModelByLobbyColor()
     return nil
 end
 
-local function getDungeonQueuePadModelByLobbyColor()
+function getDungeonQueuePadModelByLobbyColor()
     local queues = getLobbyQueuesFolder()
     if not queues then
         return nil
@@ -3884,7 +3884,7 @@ end
 --- TP to Visual.Main with offset (0, 6, 2) — lobby queue pad.
 --- CFrame-teleport HRP onto Visual.Main then Door so the server's magnitude check passes.
 --- firetouchinterest is client-only and does not replicate — skip it entirely.
-local function fireTouchOnQueueParts(padModel)
+function fireTouchOnQueueParts(padModel)
     local main = getQueueVisualMainPart(padModel)
     local door = padModel and padModel:FindFirstChild("Door", true)
     local hrp  = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
@@ -3907,13 +3907,13 @@ local function fireTouchOnQueueParts(padModel)
 end
 
 --- Alias kept so existing call-sites (direct pad branches) don't need touching.
-local function teleportHrpToQueuePadMainWithOffset(padModel)
+function teleportHrpToQueuePadMainWithOffset(padModel)
     if not padModel then return false end
     return fireTouchOnQueueParts(padModel)
 end
 
 --- SetQueue(slot, mapKey, stage) then LaunchQueue(slot); uses resolve* remotes (same as full UI path).
-local function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
+function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
     if not padModel then
         return false
     end
@@ -3985,7 +3985,7 @@ local function trySetQueueThenLaunchQueueForPadModel(padModel, mapKey, stageNum)
 end
 
 --- Story / SetQueue: blue Visual.Main queue, or explicit slot override.
-local function resolveStoryQueueLobbySlotInstance()
+function resolveStoryQueueLobbySlotInstance()
     local lm = findLobbyMapWithQueues()
     local queues = lm and lm:FindFirstChild("Queues")
     if not queues then
@@ -4016,7 +4016,7 @@ local function resolveStoryQueueLobbySlotInstance()
 end
 
 --- Dungeon lobby queue: red Visual.Main, or explicit override (default child index 3).
-local function resolveDungeonQueueLobbySlotInstance()
+function resolveDungeonQueueLobbySlotInstance()
     local lm = findLobbyMapWithQueues()
     local queues = lm and lm:FindFirstChild("Queues")
     if not queues then
