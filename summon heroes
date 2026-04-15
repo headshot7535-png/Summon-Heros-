@@ -3102,15 +3102,26 @@ local function guiButtonDisplaysStart(btn)
     return false
 end
 
-local _startButtonByScreenGuiCache = setmetatable({}, { __mode = "k" })
-local START_BUTTON_CACHE_SEC = 0.2
+local _uiPerf = {
+    startButtonByScreenGuiCache = setmetatable({}, { __mode = "k" }),
+    startButtonCacheSec = 0.2,
+    visibleMapListsCache = { t = 0, list = nil },
+    mapListCacheSec = 0.2,
+    holderMapRowsCache = setmetatable({}, { __mode = "k" }),
+    holderMapRowsCacheSec = 0.2,
+    normaliseMapNameCache = {},
+    rowDisplayTextCache = setmetatable({}, { __mode = "k" }),
+    rowDisplayTextCacheSec = 0.35,
+    stageListByScreenGuiCache = setmetatable({}, { __mode = "k" }),
+    stageListCacheSec = 0.2,
+}
 local function findStartButtonInScreenGui(sg)
     if not sg or not sg:IsA("ScreenGui") then
         return nil
     end
     local now = os.clock()
-    local cache = _startButtonByScreenGuiCache[sg]
-    if cache and (now - cache.t) < START_BUTTON_CACHE_SEC then
+    local cache = _uiPerf.startButtonByScreenGuiCache[sg]
+    if cache and (now - cache.t) < _uiPerf.startButtonCacheSec then
         if cache.v and cache.v.Parent and cache.v:IsA("GuiButton") and guiObjectShownOnScreen(cache.v) then
             return cache.v
         end
@@ -3122,7 +3133,7 @@ local function findStartButtonInScreenGui(sg)
     for _, d in ipairs(sg:GetDescendants()) do
         if d:IsA("GuiButton") and guiObjectShownOnScreen(d) then
             if d.Name == "StartButton" then
-                _startButtonByScreenGuiCache[sg] = { t = now, v = d, miss = false }
+                _uiPerf.startButtonByScreenGuiCache[sg] = { t = now, v = d, miss = false }
                 return d
             end
             if not fallback then
@@ -3137,7 +3148,7 @@ local function findStartButtonInScreenGui(sg)
             end
         end
     end
-    _startButtonByScreenGuiCache[sg] = { t = now, v = fallback, miss = (fallback == nil) }
+    _uiPerf.startButtonByScreenGuiCache[sg] = { t = now, v = fallback, miss = (fallback == nil) }
     return fallback
 end
 
@@ -3170,17 +3181,15 @@ local function findStartButtonInPlayerGui(preferScreenGui)
     return nil
 end
 
-local _visibleMapListsCache = { t = 0, list = nil }
-local MAP_LIST_CACHE_SEC = 0.2
 local function getVisibleMapLists()
     local now = os.clock()
-    local c = _visibleMapListsCache
-    if c.list and (now - c.t) < MAP_LIST_CACHE_SEC then
+    local c = _uiPerf.visibleMapListsCache
+    if c.list and (now - c.t) < _uiPerf.mapListCacheSec then
         return c.list
     end
     local pg = LP:FindFirstChild("PlayerGui")
     if not pg then
-        _visibleMapListsCache = { t = now, list = {} }
+        _uiPerf.visibleMapListsCache = { t = now, list = {} }
         return {}
     end
     local out = {}
@@ -3189,19 +3198,17 @@ local function getVisibleMapLists()
             out[#out + 1] = mapList
         end
     end
-    _visibleMapListsCache = { t = now, list = out }
+    _uiPerf.visibleMapListsCache = { t = now, list = out }
     return out
 end
 
-local _holderMapRowsCache = setmetatable({}, { __mode = "k" })
-local HOLDER_MAP_ROWS_CACHE_SEC = 0.2
 local function getHolderMapRows(holder)
     if not holder then
         return {}
     end
     local now = os.clock()
-    local c = _holderMapRowsCache[holder]
-    if c and (now - c.t) < HOLDER_MAP_ROWS_CACHE_SEC then
+    local c = _uiPerf.holderMapRowsCache[holder]
+    if c and (now - c.t) < _uiPerf.holderMapRowsCacheSec then
         return c.rows
     end
     local rows = {}
@@ -3215,21 +3222,20 @@ local function getHolderMapRows(holder)
             rows[#rows + 1] = row
         end
     end
-    _holderMapRowsCache[holder] = { t = now, rows = rows }
+    _uiPerf.holderMapRowsCache[holder] = { t = now, rows = rows }
     return rows
 end
 
 --- Story MapSelect: one row per map key; rows do not use StageNum (RaidSelect does).
 -- Normalise a string for loose comparison (lowercase, strip spaces/punctuation).
-local _normaliseMapNameCache = {}
 local function normaliseMapName(s)
     local raw = tostring(s or "")
-    local hit = _normaliseMapNameCache[raw]
+    local hit = _uiPerf.normaliseMapNameCache[raw]
     if hit ~= nil then
         return hit
     end
     local out = raw:lower():gsub("[%s%-_]+", "")
-    _normaliseMapNameCache[raw] = out
+    _uiPerf.normaliseMapNameCache[raw] = out
     return out
 end
 
@@ -3245,15 +3251,13 @@ local DISPLAY_TO_WAVE_KEY = {
 }
 
 -- Collect ALL text from a GuiObject's TextLabels / TextButtons.
-local _rowDisplayTextCache = setmetatable({}, { __mode = "k" })
-local ROW_DISPLAY_TEXT_CACHE_SEC = 0.35
 local function rowDisplayText(obj)
     if not obj or not obj.Parent then
         return ""
     end
     local now = os.clock()
-    local cache = _rowDisplayTextCache[obj]
-    if cache and (now - cache.t) < ROW_DISPLAY_TEXT_CACHE_SEC then
+    local cache = _uiPerf.rowDisplayTextCache[obj]
+    if cache and (now - cache.t) < _uiPerf.rowDisplayTextCacheSec then
         return cache.v
     end
     local parts = {}
@@ -3263,7 +3267,7 @@ local function rowDisplayText(obj)
         end
     end
     local out = table.concat(parts, " ")
-    _rowDisplayTextCache[obj] = { t = now, v = out }
+    _uiPerf.rowDisplayTextCache[obj] = { t = now, v = out }
     return out
 end
 
@@ -3320,15 +3324,13 @@ local function findStoryMapRow(mapKey)
     return nil, nil
 end
 
-local _stageListByScreenGuiCache = setmetatable({}, { __mode = "k" })
-local STAGE_LIST_CACHE_SEC = 0.2
 local function findStageListInScreenGui(sg)
     if not sg then
         return nil
     end
     local now = os.clock()
-    local cache = _stageListByScreenGuiCache[sg]
-    if cache and (now - cache.t) < STAGE_LIST_CACHE_SEC then
+    local cache = _uiPerf.stageListByScreenGuiCache[sg]
+    if cache and (now - cache.t) < _uiPerf.stageListCacheSec then
         if cache.v and cache.v.Parent and cache.v:IsA("GuiObject") and guiObjectShownOnScreen(cache.v) then
             return cache.v
         end
@@ -3338,11 +3340,11 @@ local function findStageListInScreenGui(sg)
     end
     for _, d in ipairs(sg:GetDescendants()) do
         if d.Name == "StageList" and d:IsA("GuiObject") and guiObjectShownOnScreen(d) then
-            _stageListByScreenGuiCache[sg] = { t = now, v = d, miss = false }
+            _uiPerf.stageListByScreenGuiCache[sg] = { t = now, v = d, miss = false }
             return d
         end
     end
-    _stageListByScreenGuiCache[sg] = { t = now, v = nil, miss = true }
+    _uiPerf.stageListByScreenGuiCache[sg] = { t = now, v = nil, miss = true }
     return nil
 end
 
