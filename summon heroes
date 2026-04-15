@@ -6555,6 +6555,95 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
     persistAll()
 end)
 
+TBattle:Section("Force retry (bypass entry limits)")
+TBattle:Label("Resets client-side entry counters so the queue UI unblocks. Server still lets you play but gives 0 rewards at 0 entries.")
+
+TBattle:Button("🔄", "Reset dungeon entries", "Sets profile.Quests.DungeonEntries back to max (client-side)", nil, function()
+    local pf = getPlayerProfileFolder()
+    if not pf then
+        Win:Notify("Force retry", "Profile not loaded yet.", 3, "warning")
+        return
+    end
+    local questsFolder = pf:FindFirstChild("Quests")
+    local dungeonVal = questsFolder and questsFolder:FindFirstChild("DungeonEntries")
+    if dungeonVal and dungeonVal:IsA("IntValue") then
+        local before = dungeonVal.Value
+        local limit = 3
+        pcall(function()
+            local q = requireSystemsChildModule("Queue")
+            if q and type(q.GetDungeonEntryLimit) == "function" then
+                local ok, v = pcall(q.GetDungeonEntryLimit, q)
+                if ok and tonumber(v) then limit = tonumber(v) end
+            end
+        end)
+        dungeonVal.Value = limit
+        task.defer(refreshDungeonEntriesInfoLabel)
+        Win:Notify("Force retry", ("Dungeon entries: %d → %d (client-side reset)"):format(before, limit), 4, "success")
+        Win:Status(("Dungeon entries reset to %d"):format(limit))
+    else
+        Win:Notify("Force retry", "DungeonEntries not found in profile.Quests", 4, "error")
+    end
+end)
+
+TBattle:Button("🎪", "Reset circus entries", "Deletes profile.Challenges.NightmareCircus so entries refill to 3", nil, function()
+    local pf = getPlayerProfileFolder()
+    if not pf then
+        Win:Notify("Force retry", "Profile not loaded yet.", 3, "warning")
+        return
+    end
+    local challenges = pf:FindFirstChild("Challenges")
+    if not challenges then
+        Win:Notify("Force retry", "Challenges folder not found in profile.", 4, "error")
+        return
+    end
+    local circusFolder = challenges:FindFirstChild("NightmareCircus")
+    if circusFolder then
+        local entries = circusFolder:GetAttribute(1) or circusFolder:GetAttribute("1") or 0
+        pcall(function() circusFolder:Destroy() end)
+        Win:Notify("Force retry", ("Circus entries reset (was %s, now 3) — client-side"):format(tostring(entries)), 4, "success")
+        Win:Status("Nightmare Circus entries reset to 3")
+    else
+        Win:Notify("Force retry", "NightmareCircus already has full entries (no tracker found).", 3, "info")
+    end
+end)
+
+TBattle:Button("♻️", "Reset ALL challenge entries", "Clears all Challenges folders (Circus, hourly waves, etc.) + dungeon entries", nil, function()
+    local pf = getPlayerProfileFolder()
+    if not pf then
+        Win:Notify("Force retry", "Profile not loaded yet.", 3, "warning")
+        return
+    end
+    local count = 0
+    local challenges = pf:FindFirstChild("Challenges")
+    if challenges then
+        for _, ch in ipairs(challenges:GetChildren()) do
+            pcall(function() ch:Destroy() end)
+            count = count + 1
+        end
+    end
+    local questsFolder = pf:FindFirstChild("Quests")
+    local dungeonVal = questsFolder and questsFolder:FindFirstChild("DungeonEntries")
+    if dungeonVal and dungeonVal:IsA("IntValue") then
+        local limit = 3
+        pcall(function()
+            local q = requireSystemsChildModule("Queue")
+            if q and type(q.GetDungeonEntryLimit) == "function" then
+                local ok, v = pcall(q.GetDungeonEntryLimit, q)
+                if ok and tonumber(v) then limit = tonumber(v) end
+            end
+        end)
+        dungeonVal.Value = limit
+        count = count + 1
+    end
+    task.defer(refreshDungeonEntriesInfoLabel)
+    if count > 0 then
+        Win:Notify("Force retry", ("Reset %d entry tracker(s) — client-side"):format(count), 4, "success")
+        Win:Status(("All entry limits reset (%d trackers)"):format(count))
+    else
+        Win:Notify("Force retry", "Nothing to reset — all entries may already be full.", 3, "info")
+    end
+end)
+
 TBattle:Section("Stage vote")
 TBattle:Label("Auto votes Next Stage or Retry Stage when round ends")
 
