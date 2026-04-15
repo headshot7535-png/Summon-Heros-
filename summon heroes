@@ -67,9 +67,13 @@ local function loadConfig()
         autoStartDungeon = false,
         dungeonRaidKey = "Dungeon",
         dungeonStage = 1,
+        smartQueueSlotHop = true,
         autoBuyRotatingShop = false,
         rotatingShopKey = "ItemShop",
         rotatingShopFilter = "",
+        rotatingShopAutoDetectKey = true,
+        autoSweepLatestMap = false,
+        sweepIntervalSec = 75,
         autoFuseUnits = false,
         fuseMinStars = 3,
         fuseMaxStars = 9,
@@ -105,6 +109,9 @@ local function loadConfig()
         autoClaimAchievements = false,
         autoClaimDaily = false,
         claimQuestsIntervalSec = 45,
+        autoClaimLeaderboard = false,
+        claimLeaderboardIntervalSec = 90,
+        queueStateListener = true,
         playerWalkSpeed = 16,
         playerInfiniteJump = false,
         playerAntiAfk = false,
@@ -140,9 +147,13 @@ local function loadConfig()
         { "autoStartDungeon",       "bool" },
         { "dungeonRaidKey",         "strNonEmpty" },
         { "dungeonStage",           "intMin:1" },
+        { "smartQueueSlotHop",      "bool" },
         { "autoBuyRotatingShop",    "bool" },
         { "rotatingShopKey",        "strNonEmpty" },
         { "rotatingShopFilter",     "str" },
+        { "rotatingShopAutoDetectKey", "bool" },
+        { "autoSweepLatestMap",     "bool" },
+        { "sweepIntervalSec",       "intMin:10" },
         { "autoFuseUnits",          "bool" },
         { "fuseMinStars",           "intClamp:3:9" },
         { "fuseMaxStars",           "intClamp:3:9" },
@@ -178,6 +189,9 @@ local function loadConfig()
         { "autoClaimAchievements",  "bool" },
         { "autoClaimDaily",         "bool" },
         { "claimQuestsIntervalSec", "intMin:5" },
+        { "autoClaimLeaderboard",   "bool" },
+        { "claimLeaderboardIntervalSec", "intMin:10" },
+        { "queueStateListener",     "bool" },
         { "playerWalkSpeed",        "intClamp:0:300" },
         { "playerInfiniteJump",     "bool" },
         { "playerAntiAfk",          "bool" },
@@ -1086,6 +1100,43 @@ local function entryPriceAndCurrency(entry)
     return p, nil
 end
 
+local function rotatingShopCandidateKeys(shopKey)
+    local base = type(shopKey) == "string" and (shopKey:match("^%s*(.-)%s*$") or "") or ""
+    if #base == 0 then
+        return { "ItemShop", "PvPShop" }
+    end
+    local out, seen = {}, {}
+    local function add(k)
+        if type(k) ~= "string" then
+            return
+        end
+        k = (k:match("^%s*(.-)%s*$") or "")
+        if #k == 0 or seen[k] then
+            return
+        end
+        seen[k] = true
+        out[#out + 1] = k
+    end
+    add(base)
+    local low = string.lower(base)
+    if low == "itemshop" or low == "regularshop" or low == "shop" then
+        add("ItemShop")
+        add("PvPShop")
+    elseif low == "pvpshop" or low == "pvp" then
+        add("PvPShop")
+        add("ItemShop")
+    else
+        if string.find(low, "pvp", 1, true) then
+            add("PvPShop")
+            add("ItemShop")
+        else
+            add("ItemShop")
+            add("PvPShop")
+        end
+    end
+    return out
+end
+
 --- buyAny: true = * filter. nameSet: lower-case ItemName -> true
 local function parseRotatingShopFilter(text)
     if type(text) ~= "string" then
@@ -1124,6 +1175,7 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
     if not buyEv then
         return 0, "no_remote"
     end
+    local candidateKeys = rotatingShopCandidateKeys(shopKey)
     if not rotMod or type(rotMod) ~= "table" then
         if not buyAny then
             return 0, "no_module_filter"
@@ -1137,14 +1189,14 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
             for _, si in ipairs(slots) do
                 local i = tonumber(si)
                 if i and i >= 1 and i <= 32 then
-                    fireShopBuy(buyEv, shopKey, math.floor(i))
+                    fireShopBuy(buyEv, candidateKeys[1] or shopKey, math.floor(i))
                     bought = bought + 1
                     task.wait(1.05)
                 end
             end
         else
             for i = 1, 16 do
-                fireShopBuy(buyEv, shopKey, i)
+                fireShopBuy(buyEv, candidateKeys[1] or shopKey, i)
                 bought = bought + 1
                 task.wait(1.05)
             end
@@ -1154,7 +1206,16 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
         end
         return 0, "nothing"
     end
-    local items = rotatingShopGetItems(rotMod, shopKey)
+    local effectiveShopKey = candidateKeys[1] or shopKey
+    local items = nil
+    for _, k in ipairs(candidateKeys) do
+        local t = rotatingShopGetItems(rotMod, k)
+        if type(t) == "table" and next(t) ~= nil then
+            items = t
+            effectiveShopKey = k
+            break
+        end
+    end
     if type(items) ~= "table" then
         return 0, "no_items"
     end
@@ -1168,14 +1229,14 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
             if not want and type(iname) == "string" then
                 want = nameSet[string.lower(iname)] == true
             end
-            if want and type(iname) == "string" and rotatingShopHasStock(rotMod, shopKey, i) then
+            if want and type(iname) == "string" and rotatingShopHasStock(rotMod, effectiveShopKey, i) then
                 local price, cType = entryPriceAndCurrency(entry)
                 local canBuy = true
                 if price ~= nil and cType ~= nil then
                     canBuy = currencyCanAfford(cur, LP, price, cType)
                 end
                 if canBuy then
-                    fireShopBuy(buyEv, shopKey, i)
+                    fireShopBuy(buyEv, effectiveShopKey, i)
                     bought = bought + 1
                     task.wait(1.05)
                 end
@@ -1862,6 +1923,203 @@ local function tryClaimAchievementsAndDailyOnce(opts)
         return false, "no_api"
     end
     return true, nil
+end
+
+function detectRotatingShopKey(preferredKey)
+    local rotMod = resolveRotatingShopsBuy()
+    if type(rotMod) ~= "table" then
+        return nil, "no_module"
+    end
+    local candidates = rotatingShopCandidateKeys(preferredKey or "ItemShop")
+    for _, k in ipairs(candidates) do
+        local items = rotatingShopGetItems(rotMod, k)
+        if type(items) == "table" and next(items) ~= nil then
+            return k, nil
+        end
+    end
+    return nil, "no_items"
+end
+
+function getDungeonEntryLimitSafe()
+    local items = getItemsModule()
+    if not items then
+        return nil
+    end
+    local v = nil
+    if type(items.GetDungeonEntryLimit) == "function" then
+        local ok, out = pcall(function()
+            return items:GetDungeonEntryLimit()
+        end)
+        if ok and tonumber(out) then
+            v = tonumber(out)
+        end
+        if not v then
+            ok, out = pcall(function()
+                return items.GetDungeonEntryLimit(items)
+            end)
+            if ok and tonumber(out) then
+                v = tonumber(out)
+            end
+        end
+    end
+    return v and math.floor(v) or nil
+end
+
+function getProfileSweepsLeft()
+    local pf = getPlayerProfileFolder()
+    local sw = pf and pf:FindFirstChild("Sweeps")
+    if sw and sw:IsA("ValueBase") then
+        return tonumber(sw.Value) or 0
+    end
+    if sw and sw:GetAttribute("Value") ~= nil then
+        return tonumber(sw:GetAttribute("Value")) or 0
+    end
+    return 0
+end
+
+function getDungeonEntriesLeftSafe()
+    local pf = getPlayerProfileFolder()
+    if not pf then
+        return nil
+    end
+    local candidates = { "DungeonEntriesLeft", "DungeonEntryLeft", "DungeonEntries", "EntriesLeft", "Dungeons" }
+    for _, name in ipairs(candidates) do
+        local v = pf:FindFirstChild(name)
+        if v and v:IsA("ValueBase") then
+            return tonumber(v.Value)
+        end
+    end
+    for _, ch in ipairs(pf:GetChildren()) do
+        if ch:IsA("ValueBase") then
+            local nm = string.lower(ch.Name)
+            if string.find(nm, "dungeon", 1, true) and (string.find(nm, "entr", 1, true) or string.find(nm, "left", 1, true)) then
+                return tonumber(ch.Value)
+            end
+        end
+    end
+    return nil
+end
+
+function canPlayStoryStageNow(mapKey, stageNum)
+    local q = requireSystemsChildModule("Queue")
+    if not q then
+        return false
+    end
+    local ok, res = pcall(function()
+        if type(q.CanPlayStage) == "function" then
+            return q:CanPlayStage(LP, mapKey, stageNum)
+        end
+    end)
+    if ok and res == true then
+        return true
+    end
+    ok, res = pcall(function()
+        if type(q.CanPlayStage) == "function" then
+            return q.CanPlayStage(q, LP, mapKey, stageNum)
+        end
+    end)
+    return ok and res == true
+end
+
+function findLatestSweepTarget()
+    local ok, waveData = pcall(function()
+        return require(game.ReplicatedStorage.Systems.Waves.WaveData)
+    end)
+    if not ok or type(waveData) ~= "table" then
+        return nil, nil
+    end
+    local maps = {}
+    for key, data in pairs(waveData) do
+        if type(key) == "string"
+            and type(data) == "table"
+            and not data.Hidden
+            and not data.IsRaid
+            and not data.IsDungeon
+            and type(data.Stages) == "table" then
+            maps[#maps + 1] = { key = key, order = tonumber(data.Order) or 0, stages = #data.Stages }
+        end
+    end
+    table.sort(maps, function(a, b)
+        if a.order == b.order then
+            return tostring(a.key) > tostring(b.key)
+        end
+        return a.order > b.order
+    end)
+    for _, m in ipairs(maps) do
+        for st = math.max(1, m.stages), 1, -1 do
+            if canPlayStoryStageNow(m.key, st) then
+                return m.key, st
+            end
+        end
+    end
+    return nil, nil
+end
+
+function trySweepLatestMapOnce()
+    local sweepsLeft = getProfileSweepsLeft()
+    if sweepsLeft <= 0 then
+        return false, "no_sweeps"
+    end
+    local mapKey, stageNum = findLatestSweepTarget()
+    if not mapKey or not stageNum then
+        return false, "no_target"
+    end
+    local sweeps = requireSystemsChildModule("Sweeps")
+    if not sweeps then
+        return false, "no_module"
+    end
+    local ok = false
+    if type(sweeps.SweepWave) == "function" then
+        ok = select(1, pcall(function()
+            return sweeps:SweepWave(nil, mapKey, stageNum, 1)
+        end))
+        if not ok then
+            ok = select(1, pcall(function()
+                return sweeps:SweepWave(LP, mapKey, stageNum, 1)
+            end))
+        end
+        if not ok then
+            ok = select(1, pcall(function()
+                return sweeps:SweepWave(mapKey, stageNum, 1)
+            end))
+        end
+    end
+    if ok then
+        return true, mapKey, stageNum
+    end
+    return false, "sweep_failed"
+end
+
+function tryClaimLeaderboardRewardsOnce()
+    local m = requireSystemsChildModule("LeaderboardRewards") or requireSystemsChildModule("LeaderboardReward")
+    if not m then
+        return false, "no_module"
+    end
+    local ok = false
+    if type(m.ClaimRewards) == "function" then
+        ok = select(1, pcall(function()
+            return m:ClaimRewards()
+        end))
+        if not ok then
+            ok = select(1, pcall(function()
+                return m.ClaimRewards(m)
+            end))
+        end
+    end
+    if not ok and type(m.ClaimReward) == "function" then
+        ok = select(1, pcall(function()
+            return m:ClaimReward()
+        end))
+        if not ok then
+            ok = select(1, pcall(function()
+                return m.ClaimReward(m)
+            end))
+        end
+    end
+    if ok then
+        return true, nil
+    end
+    return false, "claim_failed"
 end
 
 local function setAutoSellRarityInGame(rarityNum, enabled)
@@ -4276,6 +4534,49 @@ function queuePadBusyByOther(slotModel, checkNearby)
     return false, nil
 end
 
+function chooseQueueSlotWithHop(preferredSlot, wantStory)
+    local hopEnabled = (saved.smartQueueSlotHop ~= false) and not (getgenv and getgenv().BonusChestDisableSlotHop == true)
+    if not hopEnabled then
+        return preferredSlot
+    end
+    local queues = getLobbyQueuesFolder()
+    if not queues then
+        return preferredSlot
+    end
+    local seen, candidates = {}, {}
+    local function add(slot)
+        if slot and slot:IsA("Model") and slot.Parent and not seen[slot] then
+            seen[slot] = true
+            candidates[#candidates + 1] = slot
+        end
+    end
+    add(preferredSlot)
+    for _, slot in ipairs(queues:GetChildren()) do
+        local main = getQueueVisualMainPart(slot)
+        if main then
+            local hueOk = (wantStory and visualMainLooksLikeStoryQueue(main))
+                or ((wantStory == false) and visualMainLooksLikeDungeonQueue(main))
+            if hueOk then
+                add(slot)
+            end
+        end
+    end
+    for _, slot in ipairs(queues:GetChildren()) do
+        add(slot)
+    end
+    local firstBusyWho = nil
+    for _, slot in ipairs(candidates) do
+        local busy, who = queuePadBusyByOther(slot, true)
+        if not busy then
+            return slot
+        end
+        if not firstBusyWho and who then
+            firstBusyWho = who
+        end
+    end
+    return nil, firstBusyWho
+end
+
 --- Lobby: Story pad (opens map UI) → map + stage → queue Door/Main → LaunchQueue / SetQueue → Start.
 function tryAutoStartStoryOnce(mapKey, stageNum)
     if type(mapKey) ~= "string" or #mapKey == 0 then
@@ -4294,12 +4595,10 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
     local _directPadModel  = getStoryQueuePadModelByLobbyColor()
     if _directPadForced or _directPadModel then
         local pad = _directPadModel or resolveStoryQueueLobbySlotInstance()
+        local busyWho
+        pad, busyWho = chooseQueueSlotWithHop(pad, true)
         if not pad then
-            return false, "no_pad"
-        end
-        local busy, who = queuePadBusyByOther(pad, true)
-        if busy then
-            return false, "pad_busy:" .. tostring(who or "unknown")
+            return false, "pad_busy:" .. tostring(busyWho or "unknown")
         end
         if teleportHrpToQueuePadMainWithOffset(pad) then
             task.wait(0.24)
@@ -4311,12 +4610,9 @@ function tryAutoStartStoryOnce(mapKey, stageNum)
         return false, "no_hrp"
     end
 
-    local slotInst = resolveStoryQueueLobbySlotInstance()
-    if slotInst then
-        local busy, who = queuePadBusyByOther(slotInst, true)
-        if busy then
-            return false, "pad_busy:" .. tostring(who or "unknown")
-        end
+    local slotInst, busyWho = chooseQueueSlotWithHop(resolveStoryQueueLobbySlotInstance(), true)
+    if not slotInst then
+        return false, "pad_busy:" .. tostring(busyWho or "unknown")
     end
 
     if getgenv and getgenv().BonusChestFireBlueQueuePadPrompt == true then
@@ -4510,12 +4806,10 @@ function tryAutoStartDungeonOnce(raidKey, stageNum)
 
     if getgenv and getgenv().BonusChestDungeonDirectPadSetQueueLaunch == true then
         local pad = getDungeonQueuePadModelByLobbyColor() or resolveDungeonQueueLobbySlotInstance()
+        local busyWho
+        pad, busyWho = chooseQueueSlotWithHop(pad, false)
         if not pad then
-            return false, "no_pad"
-        end
-        local busy, who = queuePadBusyByOther(pad, true)
-        if busy then
-            return false, "pad_busy:" .. tostring(who or "unknown")
+            return false, "pad_busy:" .. tostring(busyWho or "unknown")
         end
         if teleportHrpToQueuePadMainWithOffset(pad) then
             task.wait(0.3)
@@ -4527,12 +4821,9 @@ function tryAutoStartDungeonOnce(raidKey, stageNum)
         return false, "no_hrp"
     end
 
-    local dSlot = resolveDungeonQueueLobbySlotInstance()
-    if dSlot then
-        local busy, who = queuePadBusyByOther(dSlot, true)
-        if busy then
-            return false, "pad_busy:" .. tostring(who or "unknown")
-        end
+    local dSlot, busyWho = chooseQueueSlotWithHop(resolveDungeonQueueLobbySlotInstance(), false)
+    if not dSlot then
+        return false, "pad_busy:" .. tostring(busyWho or "unknown")
     end
 
     if getgenv and getgenv().BonusChestFireRedQueuePadPrompt == true then
@@ -5009,6 +5300,7 @@ local fuseSac1DropdownRef
 local fuseSac2DropdownRef
 local fuseSac3DropdownRef
 local refreshProfileUnitDropdowns
+local extraRefs = {}
 local summonToggleRef
 local summonPackDropdownRef
 local summonAmountInputRef
@@ -5179,9 +5471,17 @@ local function persistAllWriteNow()
         autoStartDungeon = dungeonStartToggleRef and dungeonStartToggleRef.Get() or false,
         dungeonRaidKey = raidKey,
         dungeonStage = dStage,
+        smartQueueSlotHop = persistToggleBool(extraRefs.smartQueueSlotHopToggleRef, saved.smartQueueSlotHop ~= false),
         autoBuyRotatingShop = rotatingShopToggleRef and rotatingShopToggleRef.Get() or false,
         rotatingShopKey = rShopKey,
         rotatingShopFilter = type(rFilter) == "string" and rFilter or "",
+        rotatingShopAutoDetectKey = persistToggleBool(extraRefs.shopAutoDetectKeyToggleRef, saved.rotatingShopAutoDetectKey ~= false),
+        autoSweepLatestMap = persistToggleBool(extraRefs.sweepToggleRef, saved.autoSweepLatestMap == true),
+        sweepIntervalSec = math.clamp(
+            math.floor(tonumber(extraRefs.sweepIntervalInputRef and extraRefs.sweepIntervalInputRef.Get() or saved.sweepIntervalSec) or 75),
+            10,
+            3600
+        ),
         autoFuseUnits = fuseToggleRef and fuseToggleRef.Get() or false,
         fuseMinStars = fMinCl,
         fuseMaxStars = fMaxCl,
@@ -5306,6 +5606,13 @@ local function persistAllWriteNow()
             5,
             600
         ),
+        autoClaimLeaderboard = persistToggleBool(extraRefs.claimLeaderboardToggleRef, saved.autoClaimLeaderboard == true),
+        claimLeaderboardIntervalSec = math.clamp(
+            math.floor(tonumber(extraRefs.claimLeaderboardIntervalInputRef and extraRefs.claimLeaderboardIntervalInputRef.Get() or saved.claimLeaderboardIntervalSec) or 90),
+            10,
+            3600
+        ),
+        queueStateListener = persistToggleBool(extraRefs.queueStateListenerToggleRef, saved.queueStateListener ~= false),
         playerWalkSpeed = (function()
             local w = saved.playerWalkSpeed
             if playerTabRefs.walkSlider and type(playerTabRefs.walkSlider.Get) == "function" then
@@ -5399,6 +5706,8 @@ local G = {
     statReroll = 0,
     traitReroll = 0,
     questClaim = 0,
+    sweep = 0,
+    leaderboard = 0,
     lastStoryLock = 0,
     lastStoryPadTp = 0,
     lastStoryNoStart = 0,
@@ -5406,8 +5715,11 @@ local G = {
     lastDungeonLock = 0,
     lastStoryPadBusy = 0,
     lastDungeonPadBusy = 0,
+    lastDungeonEntriesHud = 0,
     lastShopHint = 0,
+    lastShopUiRefresh = 0,
     lastFuseHint = 0,
+    lastQueueStateHint = 0,
 }
 
 -- ==================== AUTO BONUS CHESTS ====================
@@ -5620,7 +5932,18 @@ end)
 TBattle:Section("Dungeons (raid select)")
 TBattle:Label("RaidSelect: choose dungeon from live WaveData (all IsDungeon/IsRaid entries). Stage list updates to selected key.")
 
+extraRefs.smartQueueSlotHopToggleRef = TBattle:Toggle(
+    "Smart queue slot hopping",
+    "If selected story/dungeon pad is busy, tries other matching pads automatically",
+    saved.smartQueueSlotHop ~= false,
+    function(on)
+        saved.smartQueueSlotHop = (on == true)
+        persistAll()
+    end
+)
+
 local dungeonStageInfoRef
+local dungeonEntriesInfoRef
 local function refreshDungeonStageInfoLabel()
     if not dungeonStageInfoRef or type(dungeonStageInfoRef.Set) ~= "function" then
         return
@@ -5648,6 +5971,20 @@ local function refreshDungeonStageInfoLabel()
         dungeonStageInfoRef.Set(("Selected: %s · Stage %d"):format(tostring(raidKey), stageNum))
     end
 end
+local function refreshDungeonEntriesInfoLabel()
+    if not dungeonEntriesInfoRef or type(dungeonEntriesInfoRef.Set) ~= "function" then
+        return
+    end
+    local lim = getDungeonEntryLimitSafe()
+    local left = getDungeonEntriesLeftSafe()
+    if tonumber(left) and tonumber(lim) then
+        dungeonEntriesInfoRef.Set(("Entries left: %d / %d"):format(math.max(0, math.floor(left)), math.max(1, math.floor(lim))))
+    elseif tonumber(lim) then
+        dungeonEntriesInfoRef.Set(("Entries limit: %d per day"):format(math.max(1, math.floor(lim))))
+    else
+        dungeonEntriesInfoRef.Set("Entries: unavailable")
+    end
+end
 
 dungeonRaidKeyInputRef = TBattle:Dropdown(
     "Dungeon / Raid key",
@@ -5671,6 +6008,7 @@ dungeonRaidKeyInputRef = TBattle:Dropdown(
             end)
         end
         task.defer(refreshDungeonStageInfoLabel)
+        task.defer(refreshDungeonEntriesInfoLabel)
         persistAll()
     end
 )
@@ -5682,6 +6020,7 @@ dungeonStageDropdownRef = TBattle:Dropdown(
     dungeonStageOptionIndex(saved.dungeonStage, DUNGEON_STAGES_BY_KEY[saved.dungeonRaidKey] or DUNGEON_STAGE_OPTIONS),
     function()
         task.defer(refreshDungeonStageInfoLabel)
+        task.defer(refreshDungeonEntriesInfoLabel)
         persistAll()
     end
 )
@@ -5693,7 +6032,9 @@ pcall(function()
     end
 end)
 dungeonStageInfoRef = TBattle:Label("Selected: loading dungeon stage info...")
+dungeonEntriesInfoRef = TBattle:Label("Entries: loading...")
 task.defer(refreshDungeonStageInfoLabel)
+task.defer(refreshDungeonEntriesInfoLabel)
 
 dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main queue + Door, then raid UI (~0.55s)", saved.autoStartDungeon, function(on)
     G.dungeon = G.dungeon + 1
@@ -5701,6 +6042,11 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
     if on then
         spawnTracked(function()
             while g == G.dungeon and bonusChestUiAlive(UI_RUN_GEN) do
+                local nowHud = os.clock()
+                if nowHud - G.lastDungeonEntriesHud > 8 then
+                    G.lastDungeonEntriesHud = nowHud
+                    task.defer(refreshDungeonEntriesInfoLabel)
+                end
                 local raidKey = saved.dungeonRaidKey
                 if getgenv and type(getgenv().BonusChestDungeonRaidKey) == "string" and #getgenv().BonusChestDungeonRaidKey > 0 then
                     raidKey = getgenv().BonusChestDungeonRaidKey
@@ -6135,7 +6481,103 @@ end)
 
 local TShop = Win:Tab("🏪", "Shop")
 TShop:Section("Rotating shops")
-TShop:Label("RotatingShops.BuyItem · multi-select items + optional extra names · * = any in stock (needs module). Blind: getgenv().BonusChestRotatingShopSlots.")
+TShop:Label("RotatingShops.BuyItem · multi-select updates from live shop items · * = any in stock.")
+
+local function currentRotatingShopKeyForUi()
+    local shopKey = saved.rotatingShopKey
+    if rotatingShopDropdownRef and type(rotatingShopDropdownRef.Get) == "function" then
+        local _, v = rotatingShopDropdownRef.Get()
+        if type(v) == "string" and #v > 0 then
+            shopKey = v
+        end
+    end
+    if saved.rotatingShopAutoDetectKey ~= false and not (getgenv and getgenv().BonusChestDisableShopKeyDetect == true) then
+        local detected = detectRotatingShopKey(shopKey)
+        if type(detected) == "string" and #detected > 0 then
+            shopKey = detected
+        end
+    end
+    return shopKey
+end
+
+local function buildRotatingShopItemsForUi(shopKey)
+    local rotMod = resolveRotatingShopsBuy()
+    if type(rotMod) ~= "table" then
+        return nil
+    end
+    local names, seen = {}, { ["*"] = true }
+    for _, key in ipairs(rotatingShopCandidateKeys(shopKey)) do
+        local items = rotatingShopGetItems(rotMod, key)
+        if type(items) == "table" then
+            for i = 1, 32 do
+                local entry = items[i] or items[tostring(i)]
+                if type(entry) == "table" then
+                    local nm = entry.ItemName or entry.Name or entry.Id
+                    if type(nm) == "string" and #nm > 0 and not seen[nm] then
+                        seen[nm] = true
+                        names[#names + 1] = nm
+                    end
+                end
+            end
+            for _, entry in pairs(items) do
+                if type(entry) == "table" then
+                    local nm = entry.ItemName or entry.Name or entry.Id
+                    if type(nm) == "string" and #nm > 0 and not seen[nm] then
+                        seen[nm] = true
+                        names[#names + 1] = nm
+                    end
+                end
+            end
+        end
+    end
+    if #names == 0 then
+        return nil
+    end
+    table.sort(names, function(a, b)
+        return string.lower(a) < string.lower(b)
+    end)
+    local out = { "*" }
+    for _, nm in ipairs(names) do
+        out[#out + 1] = nm
+    end
+    return out
+end
+
+local function refreshRotatingShopItemsUi(quiet)
+    local shopKey = currentRotatingShopKeyForUi()
+    local liveOpts = buildRotatingShopItemsForUi(shopKey)
+    if type(liveOpts) == "table" and #liveOpts > 0 then
+        ROTATING_SHOP_ITEM_OPTIONS = liveOpts
+        if rotatingShopDropdownRef and type(rotatingShopDropdownRef.Set) == "function" then
+            pcall(function()
+                rotatingShopDropdownRef.Set(shopKey)
+            end)
+        end
+        if type(shopKey) == "string" and #shopKey > 0 and saved.rotatingShopKey ~= shopKey then
+            saved.rotatingShopKey = shopKey
+        end
+        if rotatingShopItemsMultiRef and type(rotatingShopItemsMultiRef.Refresh) == "function" then
+            local selectedVals
+            if type(rotatingShopItemsMultiRef.Get) == "function" then
+                local _, vals = rotatingShopItemsMultiRef.Get()
+                if type(vals) == "table" then
+                    selectedVals = vals
+                end
+            end
+            pcall(function()
+                rotatingShopItemsMultiRef.Refresh(ROTATING_SHOP_ITEM_OPTIONS, selectedVals)
+            end)
+        end
+        if not quiet then
+            Win:Status(("Shop items refreshed (%s)"):format(tostring(shopKey)))
+        end
+        return true
+    end
+    if not quiet then
+        Win:Status("Shop items refresh failed (module/items unavailable)")
+    end
+    return false
+end
 
 rotatingShopDropdownRef = TShop:Dropdown(
     "Shop",
@@ -6143,6 +6585,22 @@ rotatingShopDropdownRef = TShop:Dropdown(
     ROTATING_SHOP_OPTIONS,
     rotatingShopOptionIndex(saved.rotatingShopKey),
     function()
+        task.defer(function()
+            refreshRotatingShopItemsUi(true)
+        end)
+        persistAll()
+    end
+)
+
+extraRefs.shopAutoDetectKeyToggleRef = TShop:Toggle(
+    "Auto-detect active shop key",
+    "Detects whether ItemShop/PvPShop is currently active and syncs dropdown",
+    saved.rotatingShopAutoDetectKey ~= false,
+    function(on)
+        saved.rotatingShopAutoDetectKey = (on == true)
+        task.defer(function()
+            refreshRotatingShopItemsUi(true)
+        end)
         persistAll()
     end
 )
@@ -6170,12 +6628,26 @@ do
     )
 end
 
+TShop:Button("🔄", "Refresh shop items", "Reload item list from current rotating shop", nil, function()
+    refreshRotatingShopItemsUi(false)
+end)
+task.defer(function()
+    refreshRotatingShopItemsUi(true)
+end)
+
 rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s between purchases", saved.autoBuyRotatingShop, function(on)
     G.shop = G.shop + 1
     local g = G.shop
     if on then
         spawnTracked(function()
             while g == G.shop and bonusChestUiAlive(UI_RUN_GEN) do
+                local tNow = os.clock()
+                if tNow - G.lastShopUiRefresh > 45 then
+                    G.lastShopUiRefresh = tNow
+                    task.defer(function()
+                        refreshRotatingShopItemsUi(true)
+                    end)
+                end
                 local shopKey = saved.rotatingShopKey
                 if getgenv and type(getgenv().BonusChestRotatingShopKey) == "string" and #getgenv().BonusChestRotatingShopKey > 0 then
                     shopKey = getgenv().BonusChestRotatingShopKey
@@ -6183,6 +6655,17 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
                     local _, v = rotatingShopDropdownRef.Get()
                     if type(v) == "string" and #v > 0 then
                         shopKey = v
+                    end
+                end
+                if saved.rotatingShopAutoDetectKey ~= false and not (getgenv and getgenv().BonusChestDisableShopKeyDetect == true) then
+                    local detected = detectRotatingShopKey(shopKey)
+                    if type(detected) == "string" and #detected > 0 then
+                        shopKey = detected
+                        if rotatingShopDropdownRef and type(rotatingShopDropdownRef.Set) == "function" then
+                            pcall(function()
+                                rotatingShopDropdownRef.Set(shopKey)
+                            end)
+                        end
                     end
                 end
                 local filt = saved.rotatingShopFilter
@@ -6777,6 +7260,104 @@ claimDailyToggleRef = TRewards:Toggle("Auto claim daily", "Repeats at interval �
     persistAll()
 end)
 
+TRewards:Section("Sweeps")
+TRewards:Label("Uses one sweep on the latest story stage you can currently play.")
+extraRefs.sweepIntervalInputRef = TRewards:Input(
+    "Sweep interval (sec)",
+    "How often to attempt one latest-map sweep (min 10)",
+    "75",
+    tostring(saved.sweepIntervalSec),
+    function()
+        persistAll()
+    end
+)
+local function restartSweepAutoLoop()
+    G.sweep = G.sweep + 1
+    local g = G.sweep
+    local on = extraRefs.sweepToggleRef and extraRefs.sweepToggleRef.Get and extraRefs.sweepToggleRef.Get() == true
+    if not on then
+        return
+    end
+    spawnTracked(function()
+        while g == G.sweep and bonusChestUiAlive(UI_RUN_GEN) do
+            local ok, a, b = trySweepLatestMapOnce()
+            if ok then
+                Win:Status(("Sweep: %s stage %s"):format(tostring(a), tostring(b)))
+            elseif a == "no_sweeps" then
+                Win:Status("Sweep: no sweeps left")
+            elseif a == "no_target" then
+                Win:Status("Sweep: no playable target")
+            end
+            local w = tonumber(extraRefs.sweepIntervalInputRef and extraRefs.sweepIntervalInputRef.Get and extraRefs.sweepIntervalInputRef.Get() or saved.sweepIntervalSec) or 75
+            if getgenv and type(getgenv().BonusChestSweepIntervalSec) == "number" then
+                w = getgenv().BonusChestSweepIntervalSec
+            end
+            task.wait(math.clamp(math.floor(w), 10, 3600))
+        end
+    end)
+end
+TRewards:Button("🧹", "Sweep latest once", "Uses one sweep on the highest stage you can play", nil, function()
+    spawnTracked(function()
+        local ok, a, b = trySweepLatestMapOnce()
+        if ok then
+            Win:Notify("Sweep", ("Swept %s · stage %s"):format(tostring(a), tostring(b)), 3, "success")
+        else
+            Win:Notify("Sweep", ("Sweep skipped: %s"):format(tostring(a)), 4, "warning")
+        end
+    end)
+end)
+extraRefs.sweepToggleRef = TRewards:Toggle("Auto sweep latest map", "Spends one sweep per interval on best playable story stage", saved.autoSweepLatestMap == true, function(on)
+    saved.autoSweepLatestMap = (on == true)
+    restartSweepAutoLoop()
+    persistAll()
+end)
+
+TRewards:Section("Leaderboard rewards")
+extraRefs.claimLeaderboardIntervalInputRef = TRewards:Input(
+    "Leaderboard interval (sec)",
+    "How often auto-claim leaderboard rewards runs",
+    "90",
+    tostring(saved.claimLeaderboardIntervalSec),
+    function()
+        persistAll()
+    end
+)
+local function restartLeaderboardClaimLoop()
+    G.leaderboard = G.leaderboard + 1
+    local g = G.leaderboard
+    local on = extraRefs.claimLeaderboardToggleRef and extraRefs.claimLeaderboardToggleRef.Get and extraRefs.claimLeaderboardToggleRef.Get() == true
+    if not on then
+        return
+    end
+    spawnTracked(function()
+        while g == G.leaderboard and bonusChestUiAlive(UI_RUN_GEN) do
+            local ok, why = tryClaimLeaderboardRewardsOnce()
+            if ok then
+                Win:Status("Leaderboard: claim sent")
+            elseif why == "no_module" then
+                Win:Status("Leaderboard: module missing")
+            end
+            local w = tonumber(extraRefs.claimLeaderboardIntervalInputRef and extraRefs.claimLeaderboardIntervalInputRef.Get and extraRefs.claimLeaderboardIntervalInputRef.Get() or saved.claimLeaderboardIntervalSec) or 90
+            task.wait(math.clamp(math.floor(w), 10, 3600))
+        end
+    end)
+end
+TRewards:Button("🏆", "Claim leaderboard now", "Attempts claim via LeaderboardRewards module", nil, function()
+    spawnTracked(function()
+        local ok, why = tryClaimLeaderboardRewardsOnce()
+        if ok then
+            Win:Notify("Leaderboard", "Claim request sent.", 3, "success")
+        else
+            Win:Notify("Leaderboard", ("Claim failed: %s"):format(tostring(why)), 4, "warning")
+        end
+    end)
+end)
+extraRefs.claimLeaderboardToggleRef = TRewards:Toggle("Auto claim leaderboard", "Repeats leaderboard claim at interval", saved.autoClaimLeaderboard == true, function(on)
+    saved.autoClaimLeaderboard = (on == true)
+    restartLeaderboardClaimLoop()
+    persistAll()
+end)
+
 TRewards:Section("Promo codes")
 TRewards:Label("PromoCodes.ClaimCode · set getgenv().BonusChestPromoCodes or PROMO_CODES_EDIT in script.")
 
@@ -6812,6 +7393,64 @@ redeemToggleRef = TRewards:Toggle("Auto redeem codes", "Retry full list every 2 
     persistAll()
 end)
 
+local function bindQueueStateRemotesOnce()
+    if extraRefs._queueStateBound then
+        return true
+    end
+    local enabled = (saved.queueStateListener ~= false)
+    if extraRefs.queueStateListenerToggleRef and type(extraRefs.queueStateListenerToggleRef.Get) == "function" then
+        enabled = extraRefs.queueStateListenerToggleRef.Get() == true
+    end
+    if not enabled then
+        return false
+    end
+    local showEv = findRemoteAnywhere("ShowTeleportOverlay")
+    local leftEv = findRemoteAnywhere("LeftQueue")
+    local bound = false
+    extraRefs._queueStateConns = extraRefs._queueStateConns or {}
+    if showEv and showEv:IsA("RemoteEvent") then
+        local c1 = connectTracked(showEv.OnClientEvent, function(a, b, c, d)
+            local label = tostring(a or "Teleport")
+            local map = tostring(b or "")
+            local stage = tostring(c or "")
+            local mode = tostring(d or "")
+            if #map > 0 and #stage > 0 then
+                Win:Status(("[Queue] %s → %s stage %s %s"):format(label, map, stage, mode ~= "" and ("(" .. mode .. ")") or ""))
+            else
+                Win:Status("[Queue] " .. label)
+            end
+        end)
+        if c1 then
+            extraRefs._queueStateConns[#extraRefs._queueStateConns + 1] = c1
+        end
+        bound = true
+    end
+    if leftEv and leftEv:IsA("RemoteEvent") then
+        local c2 = connectTracked(leftEv.OnClientEvent, function()
+            Win:Status("[Queue] Left queue / returned to lobby")
+        end)
+        if c2 then
+            extraRefs._queueStateConns[#extraRefs._queueStateConns + 1] = c2
+        end
+        bound = true
+    end
+    extraRefs._queueStateBound = bound
+    return bound
+end
+
+local function startQueueStateListenerLoop()
+    if extraRefs._queueStateLoopStarted then
+        return
+    end
+    extraRefs._queueStateLoopStarted = true
+    spawnTracked(function()
+        while bonusChestUiAlive(UI_RUN_GEN) do
+            bindQueueStateRemotesOnce()
+            task.wait(3)
+        end
+    end)
+end
+
 local TSystem = Win:Tab("⚙", "System")
 TSystem:Section("Session")
 TSystem:Label("Auto re-exec (AniPixels-style): queues on load + right before TeleportService. Not after full disconnect — use executor auto-exec.")
@@ -6829,6 +7468,30 @@ TSystem:Button("💬", "Join Discord", "Opens discord.gg/ErGUHtVK in browser", n
     Win:Status("discord.gg/ErGUHtVK — link copied!")
 end)
 TSystem:Label("Invite: " .. getSummonHeroesDiscordInvite())
+extraRefs.queueStateListenerToggleRef = TSystem:Toggle(
+    "Queue/teleport state listener",
+    "Listens to queue overlay + left-queue events and updates status line",
+    saved.queueStateListener ~= false,
+    function(on)
+        saved.queueStateListener = (on == true)
+        if on then
+            extraRefs._queueStateBound = false
+            startQueueStateListenerLoop()
+        else
+            if extraRefs._queueStateConns then
+                for _, c in ipairs(extraRefs._queueStateConns) do
+                    pcall(function()
+                        c:Disconnect()
+                    end)
+                end
+            end
+            extraRefs._queueStateConns = {}
+            extraRefs._queueStateBound = false
+        end
+        persistAll()
+    end
+)
+startQueueStateListenerLoop()
 
 local reexecQueued = false
 queueToggleRef = TSystem:Toggle(
@@ -6927,6 +7590,9 @@ task.defer(function()
     if rotatingShopToggleRef then
         rotatingShopToggleRef.Set(saved.autoBuyRotatingShop == true)
     end
+    if extraRefs.shopAutoDetectKeyToggleRef and type(extraRefs.shopAutoDetectKeyToggleRef.Set) == "function" then
+        extraRefs.shopAutoDetectKeyToggleRef.Set(saved.rotatingShopAutoDetectKey ~= false)
+    end
     if statRerollToggleRef then
         statRerollToggleRef.Set(saved.autoStatReroll == true)
     end
@@ -6944,6 +7610,18 @@ task.defer(function()
     end
     if claimDailyToggleRef then
         claimDailyToggleRef.Set(saved.autoClaimDaily == true)
+    end
+    if extraRefs.claimLeaderboardToggleRef and type(extraRefs.claimLeaderboardToggleRef.Set) == "function" then
+        extraRefs.claimLeaderboardToggleRef.Set(saved.autoClaimLeaderboard == true)
+    end
+    if extraRefs.sweepToggleRef and type(extraRefs.sweepToggleRef.Set) == "function" then
+        extraRefs.sweepToggleRef.Set(saved.autoSweepLatestMap == true)
+    end
+    if extraRefs.smartQueueSlotHopToggleRef and type(extraRefs.smartQueueSlotHopToggleRef.Set) == "function" then
+        extraRefs.smartQueueSlotHopToggleRef.Set(saved.smartQueueSlotHop ~= false)
+    end
+    if extraRefs.queueStateListenerToggleRef and type(extraRefs.queueStateListenerToggleRef.Set) == "function" then
+        extraRefs.queueStateListenerToggleRef.Set(saved.queueStateListener ~= false)
     end
     if queueToggleRef then
         queueToggleRef.Set(saved.queueOnTeleport ~= false)
