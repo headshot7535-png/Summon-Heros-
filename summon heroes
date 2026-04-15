@@ -56,7 +56,6 @@ local function loadConfig()
     local defaults = {
         autoCollect = false,
         queueOnTeleport = true,
-        autoRevive = false,
         autoPlayNextMap = false,
         autoRetryStage = false,
         autoReadyUp = false,
@@ -71,7 +70,9 @@ local function loadConfig()
         autoBuyRotatingShop = false,
         rotatingShopKey = "ItemShop",
         rotatingShopFilter = "",
+        rotatingShopBuyDelaySec = 1.05,
         rotatingShopAutoDetectKey = true,
+        autoLobbyOnShopRefresh = false,
         autoSweepLatestMap = false,
         sweepIntervalSec = 75,
         autoFuseUnits = false,
@@ -81,6 +82,7 @@ local function loadConfig()
         fuseMainUnitId = "",
         fuseSacrificeIds = "",
         autoSummon = false,
+        autoSkipTapToSkip = true,
         summonPack = "Pack1",
         summonAmount = 1,
         summonCurrency = "Gems",
@@ -109,6 +111,8 @@ local function loadConfig()
         autoClaimAchievements = false,
         autoClaimDaily = false,
         claimQuestsIntervalSec = 45,
+        autoClaimUnitDex = false,
+        claimUnitDexIntervalSec = 90,
         autoClaimLeaderboard = false,
         claimLeaderboardIntervalSec = 90,
         queueStateListener = true,
@@ -136,7 +140,6 @@ local function loadConfig()
     local FIELDS = {
         { "autoCollect",            "bool" },
         { "queueOnTeleport",        "bool" },
-        { "autoRevive",             "bool" },
         { "autoPlayNextMap",        "bool" },
         { "autoRetryStage",         "bool" },
         { "autoReadyUp",            "bool" },
@@ -151,7 +154,9 @@ local function loadConfig()
         { "autoBuyRotatingShop",    "bool" },
         { "rotatingShopKey",        "strNonEmpty" },
         { "rotatingShopFilter",     "str" },
+        { "rotatingShopBuyDelaySec","floatMin:0" },
         { "rotatingShopAutoDetectKey", "bool" },
+        { "autoLobbyOnShopRefresh", "bool" },
         { "autoSweepLatestMap",     "bool" },
         { "sweepIntervalSec",       "intMin:10" },
         { "autoFuseUnits",          "bool" },
@@ -161,6 +166,7 @@ local function loadConfig()
         { "fuseMainUnitId",         "str" },
         { "fuseSacrificeIds",       "str" },
         { "autoSummon",             "bool" },
+        { "autoSkipTapToSkip",      "bool" },
         { "summonPack",             "strNonEmpty" },
         { "summonAmount",           "intClamp:1:10" },
         { "summonCurrency",         "strNonEmpty" },
@@ -189,6 +195,8 @@ local function loadConfig()
         { "autoClaimAchievements",  "bool" },
         { "autoClaimDaily",         "bool" },
         { "claimQuestsIntervalSec", "intMin:5" },
+        { "autoClaimUnitDex",       "bool" },
+        { "claimUnitDexIntervalSec","intMin:10" },
         { "autoClaimLeaderboard",   "bool" },
         { "claimLeaderboardIntervalSec", "intMin:10" },
         { "queueStateListener",     "bool" },
@@ -699,96 +707,6 @@ local function findShownGuiButtonForRoundEnd(which)
     return nil
 end
 
-local function getTryReviveRemote()
-    local systems = getSystemsFolder()
-    local waves = systems and systems:FindFirstChild("Waves")
-    return waves and waves:FindFirstChild("TryReviveUnit")
-end
-
-local function getEquippedFolder()
-    local pg = LP:FindFirstChild("PlayerGui")
-    local profile = pg and pg:FindFirstChild("Profile")
-    return profile and profile:FindFirstChild("Equipped")
-end
-
-local function buildOwnedUnitBySlotMap()
-    local out = {}
-    local units = workspace:FindFirstChild("Units")
-    if not units then
-        return out
-    end
-    for _, m in ipairs(units:GetChildren()) do
-        if m:IsA("Model") and m:GetAttribute("OwnerName") == LP.Name then
-            local ref = m:FindFirstChild("DataRef")
-            if ref and ref:IsA("ObjectValue") and ref.Value then
-                out[ref.Value] = m
-            end
-        end
-    end
-    return out
-end
-
-local function unitModelForEquippedSlot(slot, bySlotMap)
-    if bySlotMap and bySlotMap[slot] then
-        return bySlotMap[slot]
-    end
-    local units = workspace:FindFirstChild("Units")
-    if not units then
-        return nil
-    end
-    for _, m in ipairs(units:GetChildren()) do
-        if m:IsA("Model") and m:GetAttribute("OwnerName") == LP.Name then
-            local ref = m:FindFirstChild("DataRef")
-            if ref and ref:IsA("ObjectValue") and ref.Value == slot then
-                return m
-            end
-        end
-    end
-    return nil
-end
-
---- Matches server revive rule: only when no live spawned unit for that Equipped folder (DataRef + Humanoid.Health).
-local function isEquippedSlotDeadForRevive(slot, bySlotMap)
-    if not slot or not slot.Parent then
-        return false
-    end
-    local model = unitModelForEquippedSlot(slot, bySlotMap)
-    if not model then
-        if workspace:GetAttribute("RoundStarted") ~= true then
-            return false
-        end
-        return true
-    end
-    local hum = model:FindFirstChildOfClass("Humanoid")
-    if not hum then
-        return true
-    end
-    return hum.Health <= 0
-end
-
---- Fires TryReviveUnit only for equipped slots whose unit is dead or not spawned (during an active round).
-local function fireReviveAllSlots()
-    local ev = getTryReviveRemote()
-    if not ev or not ev:IsA("RemoteEvent") then
-        return false
-    end
-    local eq = getEquippedFolder()
-    if not eq then
-        return false
-    end
-    local bySlotMap = buildOwnedUnitBySlotMap()
-    local any = false
-    for _, slot in ipairs(eq:GetChildren()) do
-        if isEquippedSlotDeadForRevive(slot, bySlotMap) then
-            any = true
-            pcall(function()
-                ev:FireServer(slot)
-            end)
-        end
-    end
-    return any
-end
-
 local function collectPromoCodeStrings()
     local out, seen = {}, {}
     local function add(s)
@@ -1162,8 +1080,37 @@ local function parseRotatingShopFilter(text)
     return false, set, nil
 end
 
+local function rotatingShopNameWanted(nameSet, iname)
+    if type(iname) ~= "string" or type(nameSet) ~= "table" then
+        return false
+    end
+    local low = string.lower(iname)
+    if nameSet[low] == true then
+        return true
+    end
+    for k, on in pairs(nameSet) do
+        if on == true and type(k) == "string" and #k > 0 then
+            if string.find(low, k, 1, true) or string.find(k, low, 1, true) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function resolveRotatingShopBuyDelay(delaySec)
+    local d = tonumber(delaySec)
+    if not d then
+        d = tonumber(saved and saved.rotatingShopBuyDelaySec) or 1.05
+    end
+    if getgenv and type(getgenv().BonusChestRotatingShopBuyDelaySec) == "number" then
+        d = getgenv().BonusChestRotatingShopBuyDelaySec
+    end
+    return math.clamp(tonumber(d) or 1.05, 0.1, 1.5)
+end
+
 --- Buys matching slots (1..n); ~1s between fires (matches in-game buy cooldown). Returns count, reason.
-local function tryRotatingShopAutoBuy(shopKey, filterText)
+local function tryRotatingShopAutoBuy(shopKey, filterText, buyDelaySec)
     if type(shopKey) ~= "string" or #shopKey == 0 then
         return 0, "bad_shop"
     end
@@ -1176,6 +1123,7 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
         return 0, "no_remote"
     end
     local candidateKeys = rotatingShopCandidateKeys(shopKey)
+    local buyDelay = resolveRotatingShopBuyDelay(buyDelaySec)
     if not rotMod or type(rotMod) ~= "table" then
         if not buyAny then
             return 0, "no_module_filter"
@@ -1191,14 +1139,14 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
                 if i and i >= 1 and i <= 32 then
                     fireShopBuy(buyEv, candidateKeys[1] or shopKey, math.floor(i))
                     bought = bought + 1
-                    task.wait(1.05)
+                    task.wait(buyDelay)
                 end
             end
         else
             for i = 1, 16 do
                 fireShopBuy(buyEv, candidateKeys[1] or shopKey, i)
                 bought = bought + 1
-                task.wait(1.05)
+                task.wait(buyDelay)
             end
         end
         if bought > 0 then
@@ -1227,7 +1175,7 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
             local iname = entry.ItemName or entry.Name or entry.Id
             local want = buyAny
             if not want and type(iname) == "string" then
-                want = nameSet[string.lower(iname)] == true
+                want = rotatingShopNameWanted(nameSet, iname)
             end
             if want and type(iname) == "string" and rotatingShopHasStock(rotMod, effectiveShopKey, i) then
                 local price, cType = entryPriceAndCurrency(entry)
@@ -1238,7 +1186,7 @@ local function tryRotatingShopAutoBuy(shopKey, filterText)
                 if canBuy then
                     fireShopBuy(buyEv, effectiveShopKey, i)
                     bought = bought + 1
-                    task.wait(1.05)
+                    task.wait(buyDelay)
                 end
             end
         end
@@ -1541,6 +1489,7 @@ local function tryClaimQuestCategoryViaModule(m, category)
     if category == "achievement" then
         local names = {
             "ClaimAllAchievements",
+            "ClaimAllAchievement",
             "ClaimAchievements",
             "RedeemAllAchievements",
             "AutoClaimAchievements",
@@ -1557,6 +1506,7 @@ local function tryClaimQuestCategoryViaModule(m, category)
     else
         local names = {
             "ClaimAllDaily",
+            "ClaimAllDailies",
             "ClaimDailyRewards",
             "RedeemAllDaily",
             "AutoClaimDaily",
@@ -1684,7 +1634,13 @@ local function collectQuestIdsForCategory(category)
     local ids = {}
     local seen = {}
     local function add(s)
-        if type(s) ~= "string" or #s < 2 or #s > 96 then
+        if type(s) == "number" then
+            if s ~= math.floor(s) then
+                return
+            end
+            s = tostring(s)
+        end
+        if type(s) ~= "string" or #s < 1 or #s > 96 then
             return
         end
         if not s:match("^[%w_]+$") then
@@ -1749,6 +1705,10 @@ local function collectQuestIdsForCategory(category)
                         end
                     end
                 end
+            elseif category == "daily" and ancestorNameLowerHas(d, root, "daily") then
+                add(d.Name)
+            elseif category == "achievement" and ancestorNameLowerHas(d, root, "achiev") then
+                add(d.Name)
             end
         end
     end
@@ -1775,6 +1735,52 @@ local function collectQuestIdsForCategory(category)
     return ids
 end
 
+local function collectQuestIdsFromModule(questsModule, category)
+    if type(questsModule) ~= "table" or type(questsModule.GetQuestList) ~= "function" then
+        return {}
+    end
+    local ids, seen = {}, {}
+    local ok, list = pcall(function()
+        return questsModule:GetQuestList()
+    end)
+    if not ok or type(list) ~= "table" then
+        return ids
+    end
+    local function addAnyId(raw)
+        local id = raw
+        if type(id) == "number" and id == math.floor(id) then
+            id = tostring(id)
+        end
+        if type(id) ~= "string" or #id < 1 then
+            return
+        end
+        if seen[id] then
+            return
+        end
+        seen[id] = true
+        ids[#ids + 1] = id
+    end
+    for k, v in pairs(list) do
+        local cat = nil
+        if type(v) == "table" then
+            cat = tostring(v.Category or v.Type or v.QuestType or "")
+        end
+        local c = string.lower(cat or "")
+        if category == "daily" then
+            if c == "daily" then
+                addAnyId(type(v) == "table" and (v.Id or v.ID or v.Name or v.Key) or nil)
+                addAnyId(k)
+            end
+        elseif category == "achievement" then
+            if c == "achievement" or c == "achievements" then
+                addAnyId(type(v) == "table" and (v.Id or v.ID or v.Name or v.Key) or nil)
+                addAnyId(k)
+            end
+        end
+    end
+    return ids
+end
+
 local function tryFireQuestEventForCategory(category, perIdsCached)
     local ev = findQuestEventRemote()
     if not ev then
@@ -1785,7 +1791,13 @@ local function tryFireQuestEventForCategory(category, perIdsCached)
             ev:FireServer("ClaimAllAchievements")
         end)
         pcall(function()
+            ev:FireServer("ClaimAllAchievement")
+        end)
+        pcall(function()
             ev:FireServer("Claim", "Achievement")
+        end)
+        pcall(function()
+            ev:FireServer("Claim", "Achievements")
         end)
         pcall(function()
             ev:FireServer("ClaimAll")
@@ -1793,6 +1805,9 @@ local function tryFireQuestEventForCategory(category, perIdsCached)
     else
         pcall(function()
             ev:FireServer("ClaimAllDaily")
+        end)
+        pcall(function()
+            ev:FireServer("ClaimAllDailies")
         end)
         pcall(function()
             ev:FireServer("Claim", "Daily")
@@ -1825,12 +1840,37 @@ end
 local function tryClaimQuestCategoryOnce(category)
     local used = false
     local perIds = collectQuestIdsForCategory(category)
+    local idsSeen = {}
+    for _, q in ipairs(perIds) do
+        idsSeen[q] = true
+    end
     for _, modName in ipairs({ "Quests", "Achievements", "Quest" }) do
         local m = requireSystemsChildModule(modName)
         if m then
             used = true
+            for _, mid in ipairs(collectQuestIdsFromModule(m, category)) do
+                if not idsSeen[mid] then
+                    idsSeen[mid] = true
+                    perIds[#perIds + 1] = mid
+                end
+            end
             tryClaimQuestCategoryViaModule(m, category)
             tryEnumerateQuestModuleClaims(m, category)
+            if type(m.ClaimQuest) == "function" then
+                local capIds = math.min(#perIds, 72)
+                for i = 1, capIds do
+                    local qid = perIds[i]
+                    local qn = tonumber(qid)
+                    pcall(function()
+                        m:ClaimQuest(LP, qid)
+                    end)
+                    if qn and qn == math.floor(qn) then
+                        pcall(function()
+                            m:ClaimQuest(LP, qn)
+                        end)
+                    end
+                end
+            end
         end
     end
     local cap = 48
@@ -1842,16 +1882,40 @@ local function tryClaimQuestCategoryOnce(category)
                 pcall(function()
                     rf:InvokeServer("ClaimAllAchievements")
                 end)
+                pcall(function()
+                    rf:InvokeServer("ClaimAllAchievement")
+                end)
+                pcall(function()
+                    rf:InvokeServer("ClaimAll", "Achievement")
+                end)
             else
                 pcall(function()
                     rf:InvokeServer("ClaimAllDaily")
                 end)
+                pcall(function()
+                    rf:InvokeServer("ClaimAllDailies")
+                end)
+                pcall(function()
+                    rf:InvokeServer("ClaimAll", "Daily")
+                end)
             end
             for i = 1, math.min(#perIds, cap) do
                 local qid = perIds[i]
+                local qn = tonumber(qid)
                 pcall(function()
                     rf:InvokeServer("Claim", qid)
                 end)
+                pcall(function()
+                    rf:InvokeServer("ClaimQuest", qid)
+                end)
+                if qn and qn == math.floor(qn) then
+                    pcall(function()
+                        rf:InvokeServer("Claim", qn)
+                    end)
+                    pcall(function()
+                        rf:InvokeServer(qn)
+                    end)
+                end
             end
         end
     end
@@ -1940,6 +2004,98 @@ function detectRotatingShopKey(preferredKey)
     return nil, "no_items"
 end
 
+local function getShopUnitBundleRefreshState()
+    local rotMod = resolveRotatingShopsBuy()
+    if type(rotMod) ~= "table" then
+        return nil, nil, "no_module"
+    end
+    local seed, sec = nil, nil
+    if type(rotMod.GetUnitBundleSeed) == "function" then
+        local ok, out = pcall(function()
+            return rotMod:GetUnitBundleSeed()
+        end)
+        if ok and tonumber(out) then
+            seed = math.floor(tonumber(out))
+        end
+        if seed == nil then
+            ok, out = pcall(function()
+                return rotMod.GetUnitBundleSeed(rotMod)
+            end)
+            if ok and tonumber(out) then
+                seed = math.floor(tonumber(out))
+            end
+        end
+    end
+    if type(rotMod.GetTimeToUnitBundleRefresh) == "function" then
+        local ok, out = pcall(function()
+            return rotMod:GetTimeToUnitBundleRefresh()
+        end)
+        if ok and tonumber(out) then
+            sec = math.max(0, tonumber(out))
+        end
+        if sec == nil then
+            ok, out = pcall(function()
+                return rotMod.GetTimeToUnitBundleRefresh(rotMod)
+            end)
+            if ok and tonumber(out) then
+                sec = math.max(0, tonumber(out))
+            end
+        end
+    end
+    if seed == nil and sec == nil then
+        return nil, nil, "no_methods"
+    end
+    return seed, sec, nil
+end
+
+local function tryTeleportBackToLobbyOnce()
+    local isLobby = ReplicatedStorage:GetAttribute("IsLobby")
+    if isLobby == true then
+        return true, "already_lobby"
+    end
+    local q = requireSystemsChildModule("Queue")
+    local ok = false
+    if q and type(q.RequestReturnToLobby) == "function" then
+        ok = select(1, pcall(function()
+            return q:RequestReturnToLobby(LP)
+        end))
+        if not ok then
+            ok = select(1, pcall(function()
+                return q:RequestReturnToLobby()
+            end))
+        end
+        if not ok then
+            ok = select(1, pcall(function()
+                return q.RequestReturnToLobby(q, LP)
+            end))
+        end
+        if not ok then
+            ok = select(1, pcall(function()
+                return q.RequestReturnToLobby(q)
+            end))
+        end
+    end
+    if not ok and q and type(q.LeaveQueue) == "function" then
+        ok = select(1, pcall(function()
+            return q:LeaveQueue(LP)
+        end))
+        if not ok then
+            ok = select(1, pcall(function()
+                return q:LeaveQueue()
+            end))
+        end
+    end
+    if not ok then
+        local ev = findRemoteAnywhere("RequestReturnToLobby")
+        if ev and ev:IsA("RemoteEvent") then
+            ok = select(1, pcall(function()
+                ev:FireServer()
+            end))
+        end
+    end
+    return ok, ok and nil or "no_api"
+end
+
 function getDungeonEntryLimitSafe()
     local items = getItemsModule()
     if not items then
@@ -1975,6 +2131,48 @@ function getProfileSweepsLeft()
         return tonumber(sw:GetAttribute("Value")) or 0
     end
     return 0
+end
+
+local function getSweepRefreshSecondsSafe()
+    local q = requireSystemsChildModule("Quests")
+    local sec = nil
+    if q and type(q.GetTimeToNextDailyRefresh) == "function" then
+        local ok, out = pcall(function()
+            return q:GetTimeToNextDailyRefresh()
+        end)
+        if ok and tonumber(out) then
+            sec = tonumber(out)
+        end
+        if sec == nil then
+            ok, out = pcall(function()
+                return q.GetTimeToNextDailyRefresh(q)
+            end)
+            if ok and tonumber(out) then
+                sec = tonumber(out)
+            end
+        end
+    end
+    if sec == nil then
+        local okNow, now = pcall(function()
+            return workspace:GetServerTimeNow()
+        end)
+        if okNow and type(now) == "number" and now == now then
+            local dailySeed = (math.floor((now - -10800) / 86400) + 1) * 86400 + -10800
+            sec = dailySeed - now
+        end
+    end
+    if type(sec) ~= "number" or sec ~= sec then
+        return nil
+    end
+    return math.max(0, math.floor(sec))
+end
+
+local function formatSweepRefreshCountdown(sec)
+    local s = math.max(0, math.floor(tonumber(sec) or 0))
+    local h = math.floor(s / 3600)
+    local m = math.floor((s % 3600) / 60)
+    local ss = s % 60
+    return string.format("%02d:%02d:%02d", h, m, ss)
 end
 
 function getDungeonEntriesLeftSafe()
@@ -2058,6 +2256,10 @@ end
 function trySweepLatestMapOnce()
     local sweepsLeft = getProfileSweepsLeft()
     if sweepsLeft <= 0 then
+        local refreshSec = getSweepRefreshSecondsSafe()
+        if type(refreshSec) == "number" then
+            return false, "no_sweeps_cooldown", refreshSec
+        end
         return false, "no_sweeps"
     end
     local mapKey, stageNum = findLatestSweepTarget()
@@ -2120,6 +2322,67 @@ function tryClaimLeaderboardRewardsOnce()
         return true, nil
     end
     return false, "claim_failed"
+end
+
+function tryClaimUnitDexRewardsOnce()
+    local m = requireSystemsChildModule("UnitDex")
+    if not m then
+        return false, 0, "no_module"
+    end
+    if type(m.GetAvailableRewards) ~= "function" or type(m.ClaimReward) ~= "function" then
+        return false, 0, "no_methods"
+    end
+    local okList, rewards = pcall(function()
+        return m:GetAvailableRewards(LP)
+    end)
+    if (not okList or type(rewards) ~= "table") and type(m.GetAvailableRewards) == "function" then
+        okList, rewards = pcall(function()
+            return m.GetAvailableRewards(m, LP)
+        end)
+    end
+    if not okList or type(rewards) ~= "table" then
+        return false, 0, "read_failed"
+    end
+    local ids = {}
+    for k, v in pairs(rewards) do
+        if type(k) == "string" and #k > 0 then
+            ids[#ids + 1] = k
+        elseif type(v) == "table" then
+            local id = v.Id or v.ID or v.Name or v.Key
+            if type(id) == "string" and #id > 0 then
+                ids[#ids + 1] = id
+            end
+        elseif type(v) == "string" and #v > 0 then
+            ids[#ids + 1] = v
+        end
+    end
+    if #ids == 0 then
+        return false, 0, "none_ready"
+    end
+    local claimed = 0
+    for i = 1, math.min(#ids, 120) do
+        local id = ids[i]
+        local didClaim = false
+        pcall(function()
+            local okClaim = m:ClaimReward(LP, id)
+            if okClaim == true then
+                didClaim = true
+            end
+        end)
+        if not didClaim then
+            pcall(function()
+                local okClaim = m.ClaimReward(m, LP, id)
+                if okClaim == true then
+                    didClaim = true
+                end
+            end)
+        end
+        if didClaim then
+            claimed = claimed + 1
+        end
+        task.wait(0.06)
+    end
+    return true, claimed, nil
 end
 
 local function setAutoSellRarityInGame(rarityNum, enabled)
@@ -3388,6 +3651,44 @@ local function readRotatingShopFilterString(multiRef, inputRef)
     return mergeRotatingShopExtra(fromMulti, extra)
 end
 
+local function rotatingShopValuesFromSavedFilter(savedCsv, options)
+    local out, seen = {}, {}
+    local opts = type(options) == "table" and options or ROTATING_SHOP_ITEM_OPTIONS
+    local raw = type(savedCsv) == "string" and savedCsv or ""
+    local wantStar = false
+    local wanted = {}
+    for part in string.gmatch(raw, "[^,]+") do
+        local token = (part:match("^%s*(.-)%s*$") or "")
+        if #token > 0 then
+            if token == "*" then
+                wantStar = true
+            else
+                wanted[string.lower(token)] = true
+            end
+        end
+    end
+    local function add(v)
+        if type(v) ~= "string" or #v == 0 or seen[v] then
+            return
+        end
+        seen[v] = true
+        out[#out + 1] = v
+    end
+    if wantStar then
+        add("*")
+    end
+    for _, opt in ipairs(opts) do
+        local val = type(opt) == "table" and (opt.value or opt[2]) or opt
+        if type(val) == "string" and wanted[string.lower(val)] then
+            add(val)
+        end
+    end
+    if #out == 0 and next(wanted) == nil then
+        add("*")
+    end
+    return out
+end
+
 local function rotatingShopOptionIndex(key)
     if key == "PvPShop" then
         return 2
@@ -3904,6 +4205,71 @@ local function guiActivate(inst)
     if btn then
         fireGuiButtonClick(btn)
     end
+end
+
+local function textLooksLikeTapToSkip(s)
+    if type(s) ~= "string" or #s == 0 then
+        return false
+    end
+    local low = string.lower(s)
+    if string.find(low, "tap anywhere to skip", 1, true) then
+        return true
+    end
+    if string.find(low, "click anywhere to skip", 1, true) then
+        return true
+    end
+    low = string.gsub(low, "%s+", "")
+    return string.find(low, "tapanywheretoskip", 1, true) ~= nil
+        or string.find(low, "clickanywheretoskip", 1, true) ~= nil
+        or string.find(low, "taptoskip", 1, true) ~= nil
+end
+
+local function findLargestVisibleButton(root)
+    if not root then
+        return nil
+    end
+    local best, bestArea = nil, 0
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("GuiButton") and guiObjectShownOnScreen(d) and d.Visible ~= false then
+            local sz = d.AbsoluteSize
+            local area = (tonumber(sz.X) or 0) * (tonumber(sz.Y) or 0)
+            if area > bestArea then
+                bestArea = area
+                best = d
+            end
+        end
+    end
+    if bestArea >= 30000 then
+        return best
+    end
+    return nil
+end
+
+local function findTapToSkipButton()
+    local pg = LP and LP:FindFirstChild("PlayerGui")
+    if not pg then
+        return nil
+    end
+    for _, d in ipairs(pg:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and guiObjectShownOnScreen(d) and textLooksLikeTapToSkip(d.Text) then
+            if d:IsA("GuiButton") then
+                return d
+            end
+            local p = d.Parent
+            while p and p ~= pg do
+                if p:IsA("GuiButton") and guiObjectShownOnScreen(p) then
+                    return p
+                end
+                p = p.Parent
+            end
+            local sg = screenGuiAncestor(d)
+            local fullBtn = findLargestVisibleButton(sg)
+            if fullBtn then
+                return fullBtn
+            end
+        end
+    end
+    return nil
 end
 
 --- Deep-search PlayerGui + RS for a named RemoteEvent/Function.
@@ -5275,7 +5641,6 @@ end)
 THome:Section("Auto collect")
 
 local autoToggleRef
-local reviveToggleRef
 local readyToggleRef
 local nextStageToggleRef
 local retryStageToggleRef
@@ -5291,6 +5656,7 @@ local rotatingShopToggleRef
 local rotatingShopDropdownRef
 local rotatingShopItemsMultiRef
 local rotatingShopFilterInputRef
+local rotatingShopDelaySliderRef
 local fuseToggleRef
 local fuseMinInputRef
 local fuseMaxInputRef
@@ -5332,6 +5698,8 @@ local traitRerollSkipAnimToggleRef
 local claimAchievementsToggleRef
 local claimDailyToggleRef
 local claimQuestsIntervalInputRef
+local claimUnitDexToggleRef
+local claimUnitDexIntervalInputRef
 local playerTabRefs = {}
 
 local function getSelectedDropdownValue(ref)
@@ -5460,7 +5828,6 @@ local function persistAllWriteNow()
     saveConfig({
         autoCollect = autoToggleRef and autoToggleRef.Get() or false,
         queueOnTeleport = persistToggleBool(queueToggleRef, saved.queueOnTeleport ~= false),
-        autoRevive = reviveToggleRef and reviveToggleRef.Get() or false,
         autoReadyUp = readyToggleRef and readyToggleRef.Get() or false,
         autoPlayNextMap = nextStageToggleRef and nextStageToggleRef.Get() or false,
         autoRetryStage = retryStageToggleRef and retryStageToggleRef.Get() or false,
@@ -5475,7 +5842,13 @@ local function persistAllWriteNow()
         autoBuyRotatingShop = rotatingShopToggleRef and rotatingShopToggleRef.Get() or false,
         rotatingShopKey = rShopKey,
         rotatingShopFilter = type(rFilter) == "string" and rFilter or "",
+        rotatingShopBuyDelaySec = math.clamp(
+            tonumber(rotatingShopDelaySliderRef and rotatingShopDelaySliderRef.Get and rotatingShopDelaySliderRef.Get() or saved.rotatingShopBuyDelaySec) or 1.05,
+            0.1,
+            1.5
+        ),
         rotatingShopAutoDetectKey = persistToggleBool(extraRefs.shopAutoDetectKeyToggleRef, saved.rotatingShopAutoDetectKey ~= false),
+        autoLobbyOnShopRefresh = persistToggleBool(extraRefs.shopRefreshLobbyToggleRef, saved.autoLobbyOnShopRefresh == true),
         autoSweepLatestMap = persistToggleBool(extraRefs.sweepToggleRef, saved.autoSweepLatestMap == true),
         sweepIntervalSec = math.clamp(
             math.floor(tonumber(extraRefs.sweepIntervalInputRef and extraRefs.sweepIntervalInputRef.Get() or saved.sweepIntervalSec) or 75),
@@ -5489,6 +5862,7 @@ local function persistAllWriteNow()
         fuseMainUnitId = type(fuseMain) == "string" and fuseMain or "",
         fuseSacrificeIds = type(fuseSac) == "string" and fuseSac or "",
         autoSummon = persistToggleBool(summonToggleRef, saved.autoSummon == true),
+        autoSkipTapToSkip = persistToggleBool(extraRefs.tapSkipToggleRef, saved.autoSkipTapToSkip ~= false),
         summonPack = (function()
             local p = saved.summonPack
             if summonPackDropdownRef then
@@ -5606,6 +5980,12 @@ local function persistAllWriteNow()
             5,
             600
         ),
+        autoClaimUnitDex = persistToggleBool(claimUnitDexToggleRef, saved.autoClaimUnitDex == true),
+        claimUnitDexIntervalSec = math.clamp(
+            math.floor(tonumber(claimUnitDexIntervalInputRef and claimUnitDexIntervalInputRef.Get() or saved.claimUnitDexIntervalSec) or 90),
+            10,
+            3600
+        ),
         autoClaimLeaderboard = persistToggleBool(extraRefs.claimLeaderboardToggleRef, saved.autoClaimLeaderboard == true),
         claimLeaderboardIntervalSec = math.clamp(
             math.floor(tonumber(extraRefs.claimLeaderboardIntervalInputRef and extraRefs.claimLeaderboardIntervalInputRef.Get() or saved.claimLeaderboardIntervalSec) or 90),
@@ -5695,17 +6075,19 @@ end
 -- Generation counters: increment on toggle change to invalidate `while myId == G.*` loops (same idea as reviveLoopId / chestLoopId in templates).
 local G = {
     loop = 0,
-    revive = 0,
     ready = 0,
     redeem = 0,
     story = 0,
     dungeon = 0,
     shop = 0,
+    shopRefreshHop = 0,
     fuse = 0,
     summon = 0,
+    tapSkip = 0,
     statReroll = 0,
     traitReroll = 0,
     questClaim = 0,
+    unitDexClaim = 0,
     sweep = 0,
     leaderboard = 0,
     lastStoryLock = 0,
@@ -5718,6 +6100,10 @@ local G = {
     lastDungeonEntriesHud = 0,
     lastShopHint = 0,
     lastShopUiRefresh = 0,
+    lastTapSkip = 0,
+    lastShopRefreshSeed = nil,
+    lastShopRefreshRemain = nil,
+    lastShopLobbyHopAt = 0,
     lastFuseHint = 0,
     lastQueueStateHint = 0,
 }
@@ -5786,27 +6172,6 @@ autoToggleRef = THome:Toggle(
 )
 
 local TBattle = Win:Tab("⚔", "Battle")
-TBattle:Section("Revive")
-TBattle:Label("TryReviveUnit only if slot has no live unit (workspace.Units + DataRef) or HP ≤ 0.")
-
-reviveToggleRef = TBattle:Toggle("Auto revive", "Fire revive on equipped slots every 1.5s", saved.autoRevive, function(on)
-    G.revive = G.revive + 1
-    local myR = G.revive
-    if on then
-        spawnTracked(function()
-            while myR == G.revive and bonusChestUiAlive(UI_RUN_GEN) do
-                if not getTryReviveRemote() or not getEquippedFolder() then
-                    Win:Status("Revive: wait for Profile / Waves")
-                else
-                    fireReviveAllSlots()
-                end
-                task.wait(1.5)
-            end
-        end)
-    end
-    persistAll()
-end)
-
 TBattle:Section("Map ready")
 TBattle:Label("Waves.Ready only when ReadyButton is on-screen (ScreenGui enabled + ancestor visible).")
 
@@ -5837,7 +6202,7 @@ storyMapDropdownRef = TBattle:Dropdown(
     STORY_MAP_OPTIONS,
     storyMapOptionIndexForKey(saved.storyMapKey),
     function()
-        persistAll()
+        persistAll(true)
     end
 )
 
@@ -5847,7 +6212,7 @@ storyStageInputRef = TBattle:Input(
     "3",
     tostring(saved.storyStage),
     function()
-        persistAll()
+        persistAll(true)
     end
 )
 
@@ -6009,7 +6374,7 @@ dungeonRaidKeyInputRef = TBattle:Dropdown(
         end
         task.defer(refreshDungeonStageInfoLabel)
         task.defer(refreshDungeonEntriesInfoLabel)
-        persistAll()
+        persistAll(true)
     end
 )
 
@@ -6021,7 +6386,7 @@ dungeonStageDropdownRef = TBattle:Dropdown(
     function()
         task.defer(refreshDungeonStageInfoLabel)
         task.defer(refreshDungeonEntriesInfoLabel)
-        persistAll()
+        persistAll(true)
     end
 )
 pcall(function()
@@ -6479,6 +6844,50 @@ summonToggleRef = TUnits:Toggle("Auto summon heroes", "Every ~1.2s · same as sh
     persistAll()
 end)
 
+local function restartTapSkipOverlayLoop()
+    G.tapSkip = G.tapSkip + 1
+    local g = G.tapSkip
+    local on = extraRefs.tapSkipToggleRef and extraRefs.tapSkipToggleRef.Get and extraRefs.tapSkipToggleRef.Get() == true
+    if getgenv and type(getgenv().BonusChestAutoTapSkip) == "boolean" then
+        on = getgenv().BonusChestAutoTapSkip == true
+    end
+    if not on then
+        return
+    end
+    spawnTracked(function()
+        while g == G.tapSkip and bonusChestUiAlive(UI_RUN_GEN) do
+            local enabledNow = extraRefs.tapSkipToggleRef and extraRefs.tapSkipToggleRef.Get and extraRefs.tapSkipToggleRef.Get() == true
+            if getgenv and type(getgenv().BonusChestAutoTapSkip) == "boolean" then
+                enabledNow = getgenv().BonusChestAutoTapSkip == true
+            end
+            if not enabledNow then
+                break
+            end
+            local btn = findTapToSkipButton()
+            if btn then
+                fireGuiButtonClick(btn)
+                local now = os.clock()
+                if now - (G.lastTapSkip or 0) > 2 then
+                    G.lastTapSkip = now
+                    Win:Status("Skip: tap-to-skip overlay dismissed")
+                end
+            end
+            task.wait(0.15)
+        end
+    end)
+end
+
+extraRefs.tapSkipToggleRef = TUnits:Toggle(
+    "Auto skip tap overlays",
+    "Auto-clicks visible 'Tap anywhere to skip' prompts",
+    saved.autoSkipTapToSkip ~= false,
+    function(on)
+        saved.autoSkipTapToSkip = (on == true)
+        restartTapSkipOverlayLoop()
+        persistAll()
+    end
+)
+
 local TShop = Win:Tab("🏪", "Shop")
 TShop:Section("Rotating shops")
 TShop:Label("RotatingShops.BuyItem · multi-select updates from live shop items · * = any in stock.")
@@ -6548,11 +6957,6 @@ local function refreshRotatingShopItemsUi(quiet)
     local liveOpts = buildRotatingShopItemsForUi(shopKey)
     if type(liveOpts) == "table" and #liveOpts > 0 then
         ROTATING_SHOP_ITEM_OPTIONS = liveOpts
-        if rotatingShopDropdownRef and type(rotatingShopDropdownRef.Set) == "function" then
-            pcall(function()
-                rotatingShopDropdownRef.Set(shopKey)
-            end)
-        end
         if type(shopKey) == "string" and #shopKey > 0 and saved.rotatingShopKey ~= shopKey then
             saved.rotatingShopKey = shopKey
         end
@@ -6563,6 +6967,9 @@ local function refreshRotatingShopItemsUi(quiet)
                 if type(vals) == "table" then
                     selectedVals = vals
                 end
+            end
+            if type(selectedVals) ~= "table" or #selectedVals == 0 then
+                selectedVals = rotatingShopValuesFromSavedFilter(saved.rotatingShopFilter, ROTATING_SHOP_ITEM_OPTIONS)
             end
             pcall(function()
                 rotatingShopItemsMultiRef.Refresh(ROTATING_SHOP_ITEM_OPTIONS, selectedVals)
@@ -6613,7 +7020,7 @@ do
         ROTATING_SHOP_ITEM_OPTIONS,
         shopPickIndices,
         function()
-            persistAll()
+            persistAll(true)
         end,
         true
     )
@@ -6623,10 +7030,92 @@ do
         "CustomItem",
         shopExtraCsv,
         function()
-            persistAll()
+            persistAll(true)
         end
     )
 end
+
+rotatingShopDelaySliderRef = TShop:Slider(
+    "Buy delay (sec)",
+    "Delay between each BuyItem call (lower = faster)",
+    {
+        min = 0.1,
+        max = 1.5,
+        default = math.clamp(tonumber(saved.rotatingShopBuyDelaySec) or 1.05, 0.1, 1.5),
+        format = function(v)
+            return string.format("%.2fs", v)
+        end,
+    },
+    function()
+        persistAll()
+    end
+)
+
+function restartShopRefreshLobbyHopLoop()
+    G.shopRefreshHop = G.shopRefreshHop + 1
+    local g = G.shopRefreshHop
+    local on = extraRefs.shopRefreshLobbyToggleRef and extraRefs.shopRefreshLobbyToggleRef.Get and extraRefs.shopRefreshLobbyToggleRef.Get() == true
+    if getgenv and type(getgenv().BonusChestAutoLobbyOnShopRefresh) == "boolean" then
+        on = getgenv().BonusChestAutoLobbyOnShopRefresh == true
+    end
+    if not on then
+        return
+    end
+    local seed0, sec0 = getShopUnitBundleRefreshState()
+    G.lastShopRefreshSeed = (type(seed0) == "number") and seed0 or G.lastShopRefreshSeed
+    G.lastShopRefreshRemain = (type(sec0) == "number") and sec0 or G.lastShopRefreshRemain
+    spawnTracked(function()
+        while g == G.shopRefreshHop and bonusChestUiAlive(UI_RUN_GEN) do
+            local enabledNow = extraRefs.shopRefreshLobbyToggleRef and extraRefs.shopRefreshLobbyToggleRef.Get and extraRefs.shopRefreshLobbyToggleRef.Get() == true
+            if getgenv and type(getgenv().BonusChestAutoLobbyOnShopRefresh) == "boolean" then
+                enabledNow = getgenv().BonusChestAutoLobbyOnShopRefresh == true
+            end
+            if not enabledNow then
+                break
+            end
+            local seed, sec = getShopUnitBundleRefreshState()
+            local refreshed = false
+            if type(seed) == "number" then
+                if type(G.lastShopRefreshSeed) == "number" and seed ~= G.lastShopRefreshSeed then
+                    refreshed = true
+                end
+                G.lastShopRefreshSeed = seed
+            end
+            if not refreshed and type(sec) == "number" and type(G.lastShopRefreshRemain) == "number" then
+                if G.lastShopRefreshRemain <= 3 and sec > (G.lastShopRefreshRemain + 5) then
+                    refreshed = true
+                end
+            end
+            if type(sec) == "number" then
+                G.lastShopRefreshRemain = sec
+            end
+            if refreshed then
+                local now = os.clock()
+                if now - (G.lastShopLobbyHopAt or 0) > 8 then
+                    G.lastShopLobbyHopAt = now
+                    local ok, why = tryTeleportBackToLobbyOnce()
+                    if ok then
+                        Win:Status("Shop refreshed: returning to lobby")
+                    else
+                        Win:Status(("Shop refreshed: lobby return failed (%s)"):format(tostring(why)))
+                    end
+                end
+            end
+            task.wait(1.5)
+        end
+    end)
+end
+
+extraRefs.shopRefreshLobbyToggleRef = TShop:Toggle(
+    "Teleport to lobby on shop refresh",
+    "Watches rotating shop refresh and requests return-to-lobby when it rolls over",
+    saved.autoLobbyOnShopRefresh == true,
+    function(on)
+        saved.autoLobbyOnShopRefresh = (on == true)
+        restartShopRefreshLobbyHopLoop()
+        persistAll()
+    end
+)
 
 TShop:Button("🔄", "Refresh shop items", "Reload item list from current rotating shop", nil, function()
     refreshRotatingShopItemsUi(false)
@@ -6635,7 +7124,7 @@ task.defer(function()
     refreshRotatingShopItemsUi(true)
 end)
 
-rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s between purchases", saved.autoBuyRotatingShop, function(on)
+rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · delay configurable below (0.1–1.5s)", saved.autoBuyRotatingShop, function(on)
     G.shop = G.shop + 1
     local g = G.shop
     if on then
@@ -6661,11 +7150,7 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
                     local detected = detectRotatingShopKey(shopKey)
                     if type(detected) == "string" and #detected > 0 then
                         shopKey = detected
-                        if rotatingShopDropdownRef and type(rotatingShopDropdownRef.Set) == "function" then
-                            pcall(function()
-                                rotatingShopDropdownRef.Set(shopKey)
-                            end)
-                        end
+                        saved.rotatingShopKey = shopKey
                     end
                 end
                 local filt = saved.rotatingShopFilter
@@ -6674,7 +7159,13 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · ~1s
                 elseif rotatingShopItemsMultiRef or rotatingShopFilterInputRef then
                     filt = readRotatingShopFilterString(rotatingShopItemsMultiRef, rotatingShopFilterInputRef)
                 end
-                local n, why = tryRotatingShopAutoBuy(shopKey, filt)
+                local buyDelay = saved.rotatingShopBuyDelaySec
+                if getgenv and type(getgenv().BonusChestRotatingShopBuyDelaySec) == "number" then
+                    buyDelay = getgenv().BonusChestRotatingShopBuyDelaySec
+                elseif rotatingShopDelaySliderRef and type(rotatingShopDelaySliderRef.Get) == "function" then
+                    buyDelay = rotatingShopDelaySliderRef.Get()
+                end
+                local n, why = tryRotatingShopAutoBuy(shopKey, filt, buyDelay)
                 if n > 0 and why == "blind" then
                     Win:Notify("Shop", ("Sent %d buy request(s) (no shop module — server validates)"):format(n), 3, "success")
                 elseif n > 0 then
@@ -7260,6 +7751,60 @@ claimDailyToggleRef = TRewards:Toggle("Auto claim daily", "Repeats at interval �
     persistAll()
 end)
 
+TRewards:Section("Unit Dex")
+TRewards:Label("Claims UnitDex gems for newly collected units.")
+claimUnitDexIntervalInputRef = TRewards:Input(
+    "Unit Dex interval (sec)",
+    "How often auto UnitDex claim runs (min 10)",
+    "90",
+    tostring(saved.claimUnitDexIntervalSec),
+    function()
+        persistAll()
+    end
+)
+local function restartUnitDexClaimLoop()
+    G.unitDexClaim = G.unitDexClaim + 1
+    local g = G.unitDexClaim
+    local on = claimUnitDexToggleRef and claimUnitDexToggleRef.Get and claimUnitDexToggleRef.Get() == true
+    if not on then
+        return
+    end
+    spawnTracked(function()
+        while g == G.unitDexClaim and bonusChestUiAlive(UI_RUN_GEN) do
+            local ok, claimed, why = tryClaimUnitDexRewardsOnce()
+            if ok and (claimed or 0) > 0 then
+                Win:Status(("UnitDex: claimed %d reward(s)"):format(claimed))
+            elseif why == "none_ready" then
+                Win:Status("UnitDex: no claimable rewards")
+            elseif why == "no_module" or why == "no_methods" then
+                Win:Status("UnitDex: module not available")
+            end
+            local w = tonumber(claimUnitDexIntervalInputRef and claimUnitDexIntervalInputRef.Get and claimUnitDexIntervalInputRef.Get() or saved.claimUnitDexIntervalSec) or 90
+            if getgenv and type(getgenv().BonusChestClaimUnitDexIntervalSec) == "number" then
+                w = getgenv().BonusChestClaimUnitDexIntervalSec
+            end
+            task.wait(math.clamp(math.floor(w), 10, 3600))
+        end
+    end)
+end
+TRewards:Button("📘", "Claim Unit Dex now", "Claims all currently available UnitDex rewards", nil, function()
+    spawnTracked(function()
+        local ok, claimed, why = tryClaimUnitDexRewardsOnce()
+        if ok and (claimed or 0) > 0 then
+            Win:Notify("UnitDex", ("Claimed %d reward(s)."):format(claimed), 3, "success")
+        elseif why == "none_ready" then
+            Win:Notify("UnitDex", "No claimable rewards right now.", 4, "warning")
+        else
+            Win:Notify("UnitDex", ("Claim failed: %s"):format(tostring(why)), 4, "warning")
+        end
+    end)
+end)
+claimUnitDexToggleRef = TRewards:Toggle("Auto claim Unit Dex", "Repeats UnitDex claim at interval", saved.autoClaimUnitDex == true, function(on)
+    saved.autoClaimUnitDex = (on == true)
+    restartUnitDexClaimLoop()
+    persistAll()
+end)
+
 TRewards:Section("Sweeps")
 TRewards:Label("Uses one sweep on the latest story stage you can currently play.")
 extraRefs.sweepIntervalInputRef = TRewards:Input(
@@ -7283,6 +7828,8 @@ local function restartSweepAutoLoop()
             local ok, a, b = trySweepLatestMapOnce()
             if ok then
                 Win:Status(("Sweep: %s stage %s"):format(tostring(a), tostring(b)))
+            elseif a == "no_sweeps_cooldown" then
+                Win:Status(("Sweep: no sweeps · refreshes in %s"):format(formatSweepRefreshCountdown(b)))
             elseif a == "no_sweeps" then
                 Win:Status("Sweep: no sweeps left")
             elseif a == "no_target" then
@@ -7301,6 +7848,8 @@ TRewards:Button("🧹", "Sweep latest once", "Uses one sweep on the highest stag
         local ok, a, b = trySweepLatestMapOnce()
         if ok then
             Win:Notify("Sweep", ("Swept %s · stage %s"):format(tostring(a), tostring(b)), 3, "success")
+        elseif a == "no_sweeps_cooldown" then
+            Win:Notify("Sweep", ("No sweeps left · refreshes in %s"):format(formatSweepRefreshCountdown(b)), 4, "warning")
         else
             Win:Notify("Sweep", ("Sweep skipped: %s"):format(tostring(a)), 4, "warning")
         end
@@ -7563,9 +8112,6 @@ task.defer(function()
     if autoToggleRef then
         autoToggleRef.Set(saved.autoCollect == true)
     end
-    if reviveToggleRef then
-        reviveToggleRef.Set(saved.autoRevive == true)
-    end
     if readyToggleRef then
         readyToggleRef.Set(saved.autoReadyUp == true)
     end
@@ -7587,11 +8133,22 @@ task.defer(function()
     if summonToggleRef then
         summonToggleRef.Set(saved.autoSummon == true)
     end
+    if extraRefs.tapSkipToggleRef and type(extraRefs.tapSkipToggleRef.Set) == "function" then
+        extraRefs.tapSkipToggleRef.Set(saved.autoSkipTapToSkip ~= false)
+    end
     if rotatingShopToggleRef then
         rotatingShopToggleRef.Set(saved.autoBuyRotatingShop == true)
     end
+    if rotatingShopDelaySliderRef and type(rotatingShopDelaySliderRef.Set) == "function" then
+        pcall(function()
+            rotatingShopDelaySliderRef.Set(math.clamp(tonumber(saved.rotatingShopBuyDelaySec) or 1.05, 0.1, 1.5), false)
+        end)
+    end
     if extraRefs.shopAutoDetectKeyToggleRef and type(extraRefs.shopAutoDetectKeyToggleRef.Set) == "function" then
         extraRefs.shopAutoDetectKeyToggleRef.Set(saved.rotatingShopAutoDetectKey ~= false)
+    end
+    if extraRefs.shopRefreshLobbyToggleRef and type(extraRefs.shopRefreshLobbyToggleRef.Set) == "function" then
+        extraRefs.shopRefreshLobbyToggleRef.Set(saved.autoLobbyOnShopRefresh == true)
     end
     if statRerollToggleRef then
         statRerollToggleRef.Set(saved.autoStatReroll == true)
@@ -7611,6 +8168,9 @@ task.defer(function()
     if claimDailyToggleRef then
         claimDailyToggleRef.Set(saved.autoClaimDaily == true)
     end
+    if claimUnitDexToggleRef and type(claimUnitDexToggleRef.Set) == "function" then
+        claimUnitDexToggleRef.Set(saved.autoClaimUnitDex == true)
+    end
     if extraRefs.claimLeaderboardToggleRef and type(extraRefs.claimLeaderboardToggleRef.Set) == "function" then
         extraRefs.claimLeaderboardToggleRef.Set(saved.autoClaimLeaderboard == true)
     end
@@ -7628,6 +8188,9 @@ task.defer(function()
     end
     if (saved.autoClaimAchievements or saved.autoClaimDaily) then
         task.defer(restartQuestAutoClaimLoop)
+    end
+    if saved.autoClaimUnitDex == true then
+        task.defer(restartUnitDexClaimLoop)
     end
     if playerTabRefs.walkSlider and type(playerTabRefs.walkSlider.Set) == "function" then
         playerTabRefs.walkSlider.Set(saved.playerWalkSpeed, false)
