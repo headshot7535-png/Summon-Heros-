@@ -293,37 +293,71 @@ local NEXUSLIB_URLS = {
 }
 
 local NexusLib
-if readfile and pcall then
-    local tryPaths = {}
-    if getgenv and type(getgenv().NexusLibPath) == "string" then
-        tryPaths[#tryPaths + 1] = getgenv().NexusLibPath
+do
+    -- On re-exec: reuse the already-loaded module from getgenv so we never re-download or re-parse NexusLib.
+    -- This eliminates the HTTP delay and the black-flash between old GUI destroy and new GUI creation.
+    local _ps = (getgenv and getgenv()) or _G
+    if type(_ps) == "table"
+        and type(_ps._BonusChestNexusLib) == "table"
+        and type(_ps._BonusChestNexusLib.Window) == "function"
+    then
+        NexusLib = _ps._BonusChestNexusLib
     end
-    tryPaths[#tryPaths + 1] = "NexusLib.lua"
-    for _, path in ipairs(tryPaths) do
-        local ok, data = pcall(readfile, path)
-        if ok and type(data) == "string" and #data > 500 then
-            local lok, chunk = pcall(loadstring, data)
-            if lok and chunk then
-                local okm, mod = pcall(chunk)
-                if okm and mod and type(mod) == "table" and mod.Window then
-                    NexusLib = mod
-                    break
+
+    if not NexusLib then
+        -- Try local disk cache first (fast path)
+        if readfile and pcall then
+            local tryPaths = {}
+            if getgenv and type(getgenv().NexusLibPath) == "string" then
+                tryPaths[#tryPaths + 1] = getgenv().NexusLibPath
+            end
+            tryPaths[#tryPaths + 1] = "NexusLib.lua"
+            for _, path in ipairs(tryPaths) do
+                local ok, data = pcall(readfile, path)
+                if ok and type(data) == "string" and #data > 500 then
+                    local lok, chunk = pcall(loadstring, data)
+                    if lok and chunk then
+                        local okm, mod = pcall(chunk)
+                        if okm and mod and type(mod) == "table" and mod.Window then
+                            NexusLib = mod
+                            break
+                        end
+                    end
                 end
             end
         end
     end
-end
-if not NexusLib then
-    for _, url in ipairs(NEXUSLIB_URLS) do
-        local ok, mod = pcall(function()
-            local src = game:HttpGet(url, true)
-            if src and #src > 100 then
-                return loadstring(src)()
+
+    if not NexusLib then
+        -- Download from URL — only happens on very first ever execution
+        for _, url in ipairs(NEXUSLIB_URLS) do
+            local ok, src = pcall(function()
+                return game:HttpGet(url, true)
+            end)
+            if ok and type(src) == "string" and #src > 100 then
+                -- Write to disk so every future re-exec uses the fast readfile path
+                pcall(function()
+                    if writefile then
+                        writefile("NexusLib.lua", src)
+                    end
+                end)
+                local lok, chunk = pcall(loadstring, src)
+                if lok and chunk then
+                    local okm, mod = pcall(chunk)
+                    if okm and mod and type(mod) == "table" and mod.Window then
+                        NexusLib = mod
+                        break
+                    end
+                end
             end
-        end)
-        if ok and type(mod) == "table" and mod.Window then
-            NexusLib = mod
-            break
+        end
+    end
+
+    -- Cache the live module object in getgenv so the NEXT re-exec skips all loading entirely
+    if NexusLib then
+        local _ps2 = (getgenv and getgenv()) or _G
+        if type(_ps2) == "table" then
+            _ps2._BonusChestNexusLib = NexusLib
         end
     end
 end
@@ -335,12 +369,25 @@ end
 local SCRIPT_SOURCE_URL = (getgenv and getgenv().BonusChestScriptUrl)
     or "https://raw.githubusercontent.com/headshot7535-png/Summon-Heros-/main/summon%20heroes"
 
+-- Cache file name for the main script source — avoids re-downloading from GitHub on every teleport.
+local SCRIPT_CACHE_FILE = "SummonHeroes_cache.lua"
+
 local QUEUE_DEDUP_SEC = 1.25
 local function tryQueueOnTeleport(reason, forceQueue)
     if getgenv and getgenv().BonusChestNoQueue == true then
         return false, "skipped"
     end
-    local code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
+    -- Prefer a file-cached re-exec so teleport re-load is instant even on slow connections.
+    -- Falls back to live HttpGet if no cache exists yet.
+    local code
+    if readfile and writefile then
+        code = string.format(
+            "local _ok,_d=pcall(readfile,%q) if _ok and type(_d)=='string' and #_d>500 then loadstring(_d)() else loadstring(game:HttpGet(%q,true))() end",
+            SCRIPT_CACHE_FILE, SCRIPT_SOURCE_URL
+        )
+    else
+        code = string.format("loadstring(game:HttpGet(%q, true))()", SCRIPT_SOURCE_URL)
+    end
     local st = ((getgenv and getgenv()) or _G)
     local now = os.clock()
     if forceQueue ~= true then
@@ -385,6 +432,30 @@ end
 if not LP then
     error("[AutoBonusChests] LocalPlayer/PlayerGui not ready.")
 end
+
+-- Write this script's own source to disk so re-exec after teleport loads from file instead of re-downloading.
+-- Only writes once per session (when cache doesn't exist yet or was cleared).
+pcall(function()
+    if writefile and readfile then
+        local hasCache = false
+        local okr, existing = pcall(readfile, SCRIPT_CACHE_FILE)
+        if okr and type(existing) == "string" and #existing > 10000 then
+            hasCache = true
+        end
+        if not hasCache then
+            local src = pcall(function() return game:HttpGet(SCRIPT_SOURCE_URL, true) end)
+            -- Use script.Source if available (no extra HTTP call needed)
+            local selfSrc
+            pcall(function()
+                -- In most executors the running LocalScript has .Source accessible
+                selfSrc = tostring(script and script.Source or "")
+            end)
+            if type(selfSrc) == "string" and #selfSrc > 10000 then
+                pcall(writefile, SCRIPT_CACHE_FILE, selfSrc)
+            end
+        end
+    end
+end)
 
 -- Rule-aligned generation token: new run cancels old run cleanly.
 _G.ScriptGen = (_G.ScriptGen or 0) + 1
@@ -4248,28 +4319,41 @@ end
 local function findTapToSkipButton()
     local pg = LP and LP:FindFirstChild("PlayerGui")
     if not pg then
-        return nil
+        return nil, nil, nil
     end
     for _, d in ipairs(pg:GetDescendants()) do
-        if (d:IsA("TextLabel") or d:IsA("TextButton")) and guiObjectShownOnScreen(d) and textLooksLikeTapToSkip(d.Text) then
+        local shown = false
+        if d:IsA("GuiObject") then
+            shown = guiObjectShownOnScreen(d)
+            if not shown then
+                local sg = screenGuiAncestor(d)
+                shown = (d.Visible ~= false) and sg and (sg.Enabled ~= false)
+            end
+        end
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and shown and textLooksLikeTapToSkip(d.Text) then
             if d:IsA("GuiButton") then
-                return d
+                return d, nil, nil
             end
             local p = d.Parent
             while p and p ~= pg do
                 if p:IsA("GuiButton") and guiObjectShownOnScreen(p) then
-                    return p
+                    return p, nil, nil
                 end
                 p = p.Parent
             end
             local sg = screenGuiAncestor(d)
             local fullBtn = findLargestVisibleButton(sg)
             if fullBtn then
-                return fullBtn
+                return fullBtn, nil, nil
             end
+            local pos = d.AbsolutePosition
+            local sz = d.AbsoluteSize
+            local x = math.floor((tonumber(pos.X) or 0) + (tonumber(sz.X) or 0) * 0.5)
+            local y = math.floor((tonumber(pos.Y) or 0) + (tonumber(sz.Y) or 0) * 0.5)
+            return nil, x, y
         end
     end
-    return nil
+    return nil, nil, nil
 end
 
 --- Deep-search PlayerGui + RS for a named RemoteEvent/Function.
@@ -5585,6 +5669,9 @@ do
     pcall(function()
         _G.NexusLib_PresenceGen = (_G.NexusLib_PresenceGen or 0) + 1
     end)
+    -- Destroy only stale NexusLib GUIs from OLDER runs.
+    -- NexusLib is now instant (cached in getgenv) so there is no flash gap between destroy and create.
+    -- We do NOT destroy GUIs from the current run gen to avoid flickering on duplicate fire.
     local pg = LP and LP:FindFirstChild("PlayerGui")
     if pg then
         for _, ch in ipairs(pg:GetChildren()) do
@@ -5595,7 +5682,8 @@ do
             end
         end
     end
-    task.wait()
+    -- No task.wait() here — NexusLib is cached so the new window is created this same frame,
+    -- keeping the gap invisible instead of showing a blank frame.
 end
 -- Re-read JSON from disk immediately before building UI (each re-execution uses latest save file).
 saved = loadConfig()
@@ -5695,6 +5783,9 @@ local traitRerollModeDropdownRef
 local traitRerollMaxRollsInputRef
 local traitRerollDelayInputRef
 local traitRerollSkipAnimToggleRef
+local lockUnitDropdownRef
+local levelUnitDropdownRef
+local levelUnitTargetLevelInputRef
 local claimAchievementsToggleRef
 local claimDailyToggleRef
 local claimQuestsIntervalInputRef
@@ -6863,9 +6954,31 @@ local function restartTapSkipOverlayLoop()
             if not enabledNow then
                 break
             end
-            local btn = findTapToSkipButton()
-            if btn then
-                fireGuiButtonClick(btn)
+            local btn, tapX, tapY = findTapToSkipButton()
+            if btn or (tapX and tapY) then
+                local didClick = false
+                if btn then
+                    fireGuiButtonClick(btn)
+                    didClick = true
+                end
+                pcall(function()
+                    local vim = game:GetService("VirtualInputManager")
+                    local cam = workspace.CurrentCamera
+                    local vp = cam and cam.ViewportSize
+                    local cx = vp and math.floor((tonumber(vp.X) or 0) * 0.5) or 640
+                    local cy = vp and math.floor((tonumber(vp.Y) or 0) * 0.5) or 360
+                    local x = tapX or cx
+                    local y = tapY or cy
+                    vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                    task.wait(0.03)
+                    vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+                    if didClick == false or (math.abs(x - cx) > 48 or math.abs(y - cy) > 48) then
+                        task.wait(0.02)
+                        vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
+                        task.wait(0.03)
+                        vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+                    end
+                end)
                 local now = os.clock()
                 if now - (G.lastTapSkip or 0) > 2 then
                     G.lastTapSkip = now
@@ -6887,6 +7000,102 @@ extraRefs.tapSkipToggleRef = TUnits:Toggle(
         persistAll()
     end
 )
+
+TUnits:Section("Unit management")
+TUnits:Label("Inventory.BuySlotIncrease (+20 slots · 400 Gems) · SetUnitLocked toggle. Refresh after equip changes.")
+
+TUnits:Button("🗃️", "Buy slot increase (+20)", "Inventory.BuySlotIncrease — 400 Gems per press", nil, function()
+    local inv = getInventoryModule()
+    if not inv or type(inv.BuySlotIncrease) ~= "function" then
+        Win:Notify("Slots", "Inventory module not found.", 4, "error")
+        return
+    end
+    local profile = getPlayerProfileFolder()
+    local limFolder = profile and profile:FindFirstChild("InventoryLimits")
+    local unitsLim = limFolder and limFolder:FindFirstChild("Units")
+    local before = unitsLim and unitsLim.Value or "?"
+    local ok, err = pcall(function() inv:BuySlotIncrease(LP) end)
+    if ok then
+        local after = unitsLim and unitsLim.Value or "?"
+        if tostring(before) ~= tostring(after) then
+            Win:Notify("Slots", ("Slots: %s → %s"):format(tostring(before), tostring(after)), 4, "success")
+            Win:Status(("Inventory slots: %s"):format(tostring(after)))
+        else
+            Win:Notify("Slots", "At cap (1000) or not enough Gems (400).", 4, "warning")
+        end
+    else
+        Win:Notify("Slots", "BuySlotIncrease error: " .. tostring(err), 4, "error")
+    end
+end)
+
+do
+    local lockOpts0 = buildStatTraitUnitOptions()
+    lockUnitDropdownRef = TUnits:Dropdown(
+        "Unit to lock / unlock",
+        "Pick from equipped or inventory — Refresh to reload",
+        lockOpts0,
+        1,
+        nil
+    )
+end
+
+TUnits:Button("🔒", "Lock selected unit", "SetUnitLocked — marks unit Locked so auto-sell skips it", nil, function()
+    local inv = getInventoryModule()
+    if not inv or type(inv.SetUnitLocked) ~= "function" then
+        Win:Notify("Lock", "Inventory module missing.", 4, "error")
+        return
+    end
+    if not lockUnitDropdownRef then return end
+    local _, unitName = lockUnitDropdownRef.Get()
+    if type(unitName) ~= "string" or #unitName == 0 then
+        Win:Notify("Lock", "Select a unit first (Refresh if list is empty).", 3, "warning")
+        return
+    end
+    local profile = getPlayerProfileFolder()
+    local equipped = profile and profile:FindFirstChild("Equipped")
+    local invUnits = profile and profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+    local unit = (equipped and equipped:FindFirstChild(unitName)) or (invUnits and invUnits:FindFirstChild(unitName))
+    if not unit then
+        Win:Notify("Lock", "Unit '" .. unitName .. "' not found in profile.", 3, "warning")
+        return
+    end
+    if unit:GetAttribute("Locked") == true then
+        Win:Notify("Lock", unitName .. " already locked.", 3, "info")
+        return
+    end
+    local ok, err = pcall(function() inv:SetUnitLocked(LP, unit) end)
+    Win:Notify("Lock", ok and (unitName .. " locked ✓") or ("Error: " .. tostring(err)), 3, ok and "success" or "error")
+    if ok then Win:Status("Lock: " .. unitName .. " → locked") end
+end)
+
+TUnits:Button("🔓", "Unlock selected unit", "SetUnitLocked — removes Locked flag from unit", nil, function()
+    local inv = getInventoryModule()
+    if not inv or type(inv.SetUnitLocked) ~= "function" then
+        Win:Notify("Unlock", "Inventory module missing.", 4, "error")
+        return
+    end
+    if not lockUnitDropdownRef then return end
+    local _, unitName = lockUnitDropdownRef.Get()
+    if type(unitName) ~= "string" or #unitName == 0 then
+        Win:Notify("Unlock", "Select a unit first.", 3, "warning")
+        return
+    end
+    local profile = getPlayerProfileFolder()
+    local equipped = profile and profile:FindFirstChild("Equipped")
+    local invUnits = profile and profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+    local unit = (equipped and equipped:FindFirstChild(unitName)) or (invUnits and invUnits:FindFirstChild(unitName))
+    if not unit then
+        Win:Notify("Unlock", "Unit '" .. unitName .. "' not found in profile.", 3, "warning")
+        return
+    end
+    if unit:GetAttribute("Locked") ~= true then
+        Win:Notify("Unlock", unitName .. " already unlocked.", 3, "info")
+        return
+    end
+    local ok, err = pcall(function() inv:SetUnitLocked(LP, unit) end)
+    Win:Notify("Unlock", ok and (unitName .. " unlocked ✓") or ("Error: " .. tostring(err)), 3, ok and "success" or "error")
+    if ok then Win:Status("Unlock: " .. unitName .. " → unlocked") end
+end)
 
 local TShop = Win:Tab("🏪", "Shop")
 TShop:Section("Rotating shops")
@@ -7652,6 +7861,134 @@ traitRerollToggleRef = TRoll:Toggle("Auto trait reroll", "Until goal: stops when
     persistAll()
 end)
 
+TRoll:Section("Level up")
+TRoll:Label("UnitUpgrades.LevelUnit (feed food items) · UnitUpgrades.BuyLevel (direct, costs Coins). Refresh if list is empty.")
+
+do
+    local lvOpts0 = buildStatTraitUnitOptions()
+    levelUnitDropdownRef = TRoll:Dropdown(
+        "Unit to level",
+        "Pick unit from equipped or inventory",
+        lvOpts0,
+        1,
+        nil
+    )
+    levelUnitTargetLevelInputRef = TRoll:Input(
+        "Target level (BuyLevel)",
+        "BuyLevel: buy directly to this level · costs Coins · must be ≤ your player level",
+        "1",
+        "1"
+    )
+end
+
+TRoll:Button("🍬", "Feed all food now", "LevelUnit — feeds all food from Inventory.Food to selected unit", nil, function()
+    local upgrades = getUnitUpgradesModule()
+    if not upgrades or type(upgrades.LevelUnit) ~= "function" then
+        Win:Notify("Level", "UnitUpgrades module not found.", 4, "error")
+        return
+    end
+    if not levelUnitDropdownRef then return end
+    local _, unitName = levelUnitDropdownRef.Get()
+    local profile = getPlayerProfileFolder()
+    if not profile then
+        Win:Notify("Level", "Profile not loaded.", 3, "warning")
+        return
+    end
+    local equipped = profile:FindFirstChild("Equipped")
+    local invUnits = profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+    local unit
+    if type(unitName) == "string" and #unitName > 0 then
+        unit = (equipped and equipped:FindFirstChild(unitName)) or (invUnits and invUnits:FindFirstChild(unitName))
+    else
+        local best, bestLv = nil, -1
+        for _, u in ipairs(equipped and equipped:GetChildren() or {}) do
+            local lv = unitAttrLevel(u)
+            if lv > bestLv then best, bestLv = u, lv end
+        end
+        if not best then
+            for _, u in ipairs(invUnits and invUnits:GetChildren() or {}) do
+                local lv = unitAttrLevel(u)
+                if lv > bestLv then best, bestLv = u, lv end
+            end
+        end
+        unit = best
+    end
+    if not unit then
+        Win:Notify("Level", "No unit found — pick one or Refresh.", 3, "warning")
+        return
+    end
+    local invRoot = profile:FindFirstChild("Inventory")
+    local foodFolder = invRoot and invRoot:FindFirstChild("Food")
+    if not foodFolder then
+        Win:Notify("Level", "Food folder not found in profile.", 3, "warning")
+        return
+    end
+    local foodTable = {}
+    for _, f in ipairs(foodFolder:GetChildren()) do
+        local cnt = tonumber(f:GetAttribute("Count")) or 1
+        if cnt > 0 then
+            foodTable[f.Name] = cnt
+        end
+    end
+    if not next(foodTable) then
+        Win:Notify("Level", "No food items in your inventory.", 3, "warning")
+        return
+    end
+    local ok, result = pcall(function() return upgrades:LevelUnit(LP, unit, foodTable) end)
+    if ok and result ~= false then
+        task.defer(refreshSelectedRerollUnitStats)
+        Win:Notify("Level", ("Fed all food to %s ✓"):format(unit.Name), 4, "success")
+        Win:Status(("Level: fed food → %s"):format(unit.Name))
+    else
+        Win:Notify("Level", "LevelUnit failed (player level cap / invalid food).", 4, "warning")
+    end
+end)
+
+TRoll:Button("💰", "Buy level now", "BuyLevel — buy to target level directly with Coins", nil, function()
+    local upgrades = getUnitUpgradesModule()
+    if not upgrades or type(upgrades.BuyLevel) ~= "function" then
+        Win:Notify("BuyLevel", "UnitUpgrades module not found.", 4, "error")
+        return
+    end
+    if not levelUnitDropdownRef then return end
+    local _, unitName = levelUnitDropdownRef.Get()
+    if type(unitName) ~= "string" or #unitName == 0 then
+        Win:Notify("BuyLevel", "Select a unit first.", 3, "warning")
+        return
+    end
+    local profile = getPlayerProfileFolder()
+    if not profile then
+        Win:Notify("BuyLevel", "Profile not loaded.", 3, "warning")
+        return
+    end
+    local equipped = profile:FindFirstChild("Equipped")
+    local invUnits = profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+    local unit = (equipped and equipped:FindFirstChild(unitName)) or (invUnits and invUnits:FindFirstChild(unitName))
+    if not unit then
+        Win:Notify("BuyLevel", "Unit '" .. unitName .. "' not found.", 3, "warning")
+        return
+    end
+    local targetLvRaw = levelUnitTargetLevelInputRef and levelUnitTargetLevelInputRef.Get()
+    local targetLv = math.floor(tonumber(targetLvRaw) or 0)
+    if targetLv < 1 then
+        Win:Notify("BuyLevel", "Enter a valid target level ≥ 1.", 3, "warning")
+        return
+    end
+    local currentLv = unitAttrLevel(unit)
+    if targetLv == currentLv then
+        Win:Notify("BuyLevel", ("Unit is already level %d."):format(currentLv), 3, "info")
+        return
+    end
+    local ok, result = pcall(function() return upgrades:BuyLevel(LP, unit, targetLv) end)
+    if ok and result == true then
+        task.defer(refreshSelectedRerollUnitStats)
+        Win:Notify("BuyLevel", ("Bought Lv%d for %s ✓"):format(targetLv, unit.Name), 4, "success")
+        Win:Status(("BuyLevel: %s → Lv%d"):format(unit.Name, targetLv))
+    else
+        Win:Notify("BuyLevel", "BuyLevel failed — not enough Coins or player level too low.", 4, "warning")
+    end
+end)
+
 refreshProfileUnitDropdowns = function()
     local statOpts = buildStatTraitUnitOptions()
     if statRerollUnitDropdownRef and statRerollUnitDropdownRef.Refresh then
@@ -7679,6 +8016,14 @@ refreshProfileUnitDropdowns = function()
     if fuseSac3DropdownRef and fuseSac3DropdownRef.Refresh then
         local _, v = fuseSac3DropdownRef.Get()
         fuseSac3DropdownRef.Refresh(sacOpts, v)
+    end
+    if lockUnitDropdownRef and lockUnitDropdownRef.Refresh then
+        local _, v = lockUnitDropdownRef.Get()
+        lockUnitDropdownRef.Refresh(buildStatTraitUnitOptions(), v)
+    end
+    if levelUnitDropdownRef and levelUnitDropdownRef.Refresh then
+        local _, v = levelUnitDropdownRef.Get()
+        levelUnitDropdownRef.Refresh(buildStatTraitUnitOptions(), v)
     end
     task.defer(refreshSelectedRerollUnitStats)
 end
