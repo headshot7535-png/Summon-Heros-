@@ -68,14 +68,16 @@ local function loadConfig()
         dungeonStage = 1,
         smartQueueSlotHop = true,
         autoBuyRotatingShop = false,
+        autoBuyFood = false,
         rotatingShopKey = "ItemShop",
         rotatingShopFilter = "",
-        rotatingShopBuyDelaySec = 1.05,
+        rotatingShopBuyDelaySec = 0.15,
         rotatingShopAutoDetectKey = true,
         autoLobbyOnShopRefresh = false,
         autoSweepLatestMap = false,
         sweepIntervalSec = 75,
         autoFuseUnits = false,
+        fuseExploit = true,
         fuseMinStars = 3,
         fuseMaxStars = 9,
         fuseMaxFodderLevel = 0,
@@ -99,6 +101,7 @@ local function loadConfig()
         statRerollLockSpeed = false,
         statRerollMode = "always",
         statRerollStopTier = "OFF",
+        statRerollSmartLock = true,
         statRerollMaxRolls = 0,
         statRerollDelaySec = 1.2,
         autoTraitReroll = false,
@@ -121,6 +124,10 @@ local function loadConfig()
         playerAntiAfk = false,
         playerNoclip = false,
         playerGodMode = false,
+        autoFocusFire = false,
+        autoSpecialAll = false,
+        unitSpeedBoost = false,
+        unitSpeedMultiplier = 150,
     }
     if not readfile then
         return defaults
@@ -152,6 +159,7 @@ local function loadConfig()
         { "dungeonStage",           "intMin:1" },
         { "smartQueueSlotHop",      "bool" },
         { "autoBuyRotatingShop",    "bool" },
+        { "autoBuyFood",            "bool" },
         { "rotatingShopKey",        "strNonEmpty" },
         { "rotatingShopFilter",     "str" },
         { "rotatingShopBuyDelaySec","floatMin:0" },
@@ -160,6 +168,7 @@ local function loadConfig()
         { "autoSweepLatestMap",     "bool" },
         { "sweepIntervalSec",       "intMin:10" },
         { "autoFuseUnits",          "bool" },
+        { "fuseExploit",            "bool" },
         { "fuseMinStars",           "intClamp:3:9" },
         { "fuseMaxStars",           "intClamp:3:9" },
         { "fuseMaxFodderLevel",     "intMin:0" },
@@ -182,7 +191,8 @@ local function loadConfig()
         { "statRerollLockCooldown", "bool" },
         { "statRerollLockSpeed",    "bool" },
         { "statRerollMode",         "enum:always:better" },
-        { "statRerollStopTier",     "enum:OFF:D:C:B:A:S:SS:X:EX" },
+        { "statRerollStopTier",     "enum:OFF:D:C:B:A:S:X" },
+    { "statRerollSmartLock",    "bool" },
         { "statRerollMaxRolls",     "intMin:0" },
         { "statRerollDelaySec",     "floatMin:0" },
         { "autoTraitReroll",        "bool" },
@@ -205,6 +215,10 @@ local function loadConfig()
         { "playerAntiAfk",          "bool" },
         { "playerNoclip",           "bool" },
         { "playerGodMode",          "bool" },
+        { "autoFocusFire",          "bool" },
+        { "autoSpecialAll",         "bool" },
+        { "unitSpeedBoost",         "bool" },
+        { "unitSpeedMultiplier",    "intClamp:50:500" },
     }
 
     for _, fd in ipairs(FIELDS) do
@@ -1172,12 +1186,12 @@ end
 local function resolveRotatingShopBuyDelay(delaySec)
     local d = tonumber(delaySec)
     if not d then
-        d = tonumber(saved and saved.rotatingShopBuyDelaySec) or 1.05
+        d = tonumber(saved and saved.rotatingShopBuyDelaySec) or 0.15
     end
     if getgenv and type(getgenv().BonusChestRotatingShopBuyDelaySec) == "number" then
         d = getgenv().BonusChestRotatingShopBuyDelaySec
     end
-    return math.clamp(tonumber(d) or 1.05, 0.1, 1.5)
+    return math.clamp(tonumber(d) or 0.15, 0.05, 1.5)
 end
 
 --- Buys matching slots (1..n); ~1s between fires (matches in-game buy cooldown). Returns count, reason.
@@ -1367,6 +1381,7 @@ local function tryAutoFuseOnce(opts)
         maxS = minS
     end
     local maxFodderLv = tonumber(opts.maxFodderLevel) or 0
+    local useExploit = opts.fuseExploit ~= false
 
     local profile = getPlayerProfileFolder()
     if not profile then
@@ -1450,10 +1465,14 @@ local function tryAutoFuseOnce(opts)
             return false
         end
         local fodder = collectFuseFodder(invUnits, stars, main, maxFodderLv)
-        if #fodder < 3 then
+        local sac
+        if #fodder >= 3 then
+            sac = { fodder[1], fodder[2], fodder[3] }
+        elseif #fodder >= 1 and useExploit then
+            sac = { fodder[1], fodder[1], fodder[1] }
+        else
             return false
         end
-        local sac = { fodder[1], fodder[2], fodder[3] }
         local ok = fusion:ValidateFusion(LP, main, sac)
         if not ok then
             return false
@@ -2614,13 +2633,12 @@ local STAT_REROLL_MODE_OPTIONS = {
 
 local STAT_REROLL_STOP_TIER_OPTIONS = {
     { text = "Off", value = "OFF" },
-    { text = "D", value = "D" },
-    { text = "C", value = "C" },
-    { text = "B", value = "B" },
-    { text = "A", value = "A" },
-    { text = "S", value = "S" },
-    { text = "SS", value = "SS" },
-    { text = "X", value = "X" },
+    { text = "D (30%)", value = "D" },
+    { text = "C (24%)", value = "C" },
+    { text = "B (24%)", value = "B" },
+    { text = "A (12%)", value = "A" },
+    { text = "S (6%)", value = "S" },
+    { text = "X (3%) — best", value = "X" },
     { text = "EX", value = "EX" },
 }
 
@@ -2680,7 +2698,7 @@ local function statLetterScore(letter, curves)
         end
     end
     local fallback = {
-        D = 1, C = 2, B = 3, A = 4, S = 5, SS = 6, X = 7, EX = 8,
+        D = 1, C = 2, B = 3, A = 4, S = 5, X = 6,
     }
     if fallback[L] then
         return fallback[L]
@@ -5693,7 +5711,7 @@ Win = NexusLib:Window({ title = "Summon Heroes", width = 400, height = 760 })
 
 local THome = Win:Tab("🏠", "Home")
 THome:Section("Overview")
-THome:Label("Use tabs for each category. Player tab = movement. Toggles persist to BonusChests_config.json (Get() on save; re-exec restores from file).")
+THome:Label("Battle = story/dungeons · Units = fusion/level/manage · Shop = summon/buy · Rerolls = stat/trait · Rewards = quests/codes · Exploits = coin sell/bypass/hop · System = session")
 
 THome:Section("Bonus chests")
 THome:Label("BonusChestPart · TP + fireproximityprompt. Auto mode skips while in-round if workspace has RoundStarted=true (BonusChestChestsLobbyOnly=false to disable gate).")
@@ -5741,11 +5759,13 @@ local dungeonStartToggleRef
 local dungeonRaidKeyInputRef
 local dungeonStageDropdownRef
 local rotatingShopToggleRef
+local autoBuyFoodToggleRef
 local rotatingShopDropdownRef
 local rotatingShopItemsMultiRef
 local rotatingShopFilterInputRef
 local rotatingShopDelaySliderRef
 local fuseToggleRef
+local fuseExploitToggleRef
 local fuseMinInputRef
 local fuseMaxInputRef
 local fuseFodderMaxInputRef
@@ -5774,6 +5794,7 @@ local statRerollLockAtkToggleRef
 local statRerollLockHpToggleRef
 local statRerollLockCdToggleRef
 local statRerollLockSpdToggleRef
+local statRerollSmartLockToggleRef
 local traitRerollToggleRef
 local traitRerollUnitDropdownRef
 local traitRerollUnitInfoRef
@@ -5786,12 +5807,17 @@ local traitRerollSkipAnimToggleRef
 local lockUnitDropdownRef
 local levelUnitDropdownRef
 local levelUnitTargetLevelInputRef
+local sellDupeTimesInputRef
 local claimAchievementsToggleRef
 local claimDailyToggleRef
 local claimQuestsIntervalInputRef
 local claimUnitDexToggleRef
 local claimUnitDexIntervalInputRef
 local playerTabRefs = {}
+local focusFireToggleRef
+local autoSpecialToggleRef
+local unitSpeedBoostToggleRef
+local unitSpeedMultiplierSliderRef
 
 local function getSelectedDropdownValue(ref)
     if not ref or type(ref.Get) ~= "function" then
@@ -5931,11 +5957,12 @@ local function persistAllWriteNow()
         dungeonStage = dStage,
         smartQueueSlotHop = persistToggleBool(extraRefs.smartQueueSlotHopToggleRef, saved.smartQueueSlotHop ~= false),
         autoBuyRotatingShop = rotatingShopToggleRef and rotatingShopToggleRef.Get() or false,
+        autoBuyFood = autoBuyFoodToggleRef and autoBuyFoodToggleRef.Get() or false,
         rotatingShopKey = rShopKey,
         rotatingShopFilter = type(rFilter) == "string" and rFilter or "",
         rotatingShopBuyDelaySec = math.clamp(
-            tonumber(rotatingShopDelaySliderRef and rotatingShopDelaySliderRef.Get and rotatingShopDelaySliderRef.Get() or saved.rotatingShopBuyDelaySec) or 1.05,
-            0.1,
+            tonumber(rotatingShopDelaySliderRef and rotatingShopDelaySliderRef.Get and rotatingShopDelaySliderRef.Get() or saved.rotatingShopBuyDelaySec) or 0.15,
+            0.05,
             1.5
         ),
         rotatingShopAutoDetectKey = persistToggleBool(extraRefs.shopAutoDetectKeyToggleRef, saved.rotatingShopAutoDetectKey ~= false),
@@ -5947,6 +5974,7 @@ local function persistAllWriteNow()
             3600
         ),
         autoFuseUnits = fuseToggleRef and fuseToggleRef.Get() or false,
+        fuseExploit = fuseExploitToggleRef and fuseExploitToggleRef.Get() or (saved.fuseExploit ~= false),
         fuseMinStars = fMinCl,
         fuseMaxStars = fMaxCl,
         fuseMaxFodderLevel = math.max(0, math.floor(fFd)),
@@ -6024,6 +6052,7 @@ local function persistAllWriteNow()
             end
             return normalizeStatTierToken(v)
         end)(),
+        statRerollSmartLock = (statRerollSmartLockToggleRef and statRerollSmartLockToggleRef.Get() or saved.statRerollSmartLock) == true,
         statRerollMaxRolls = math.max(
             0,
             math.floor(tonumber(statRerollMaxRollsInputRef and statRerollMaxRollsInputRef.Get() or saved.statRerollMaxRolls) or 0)
@@ -6118,6 +6147,13 @@ local function persistAllWriteNow()
             end
             return saved.playerGodMode
         end)(),
+        autoFocusFire = persistToggleBool(focusFireToggleRef, saved.autoFocusFire == true),
+        autoSpecialAll = persistToggleBool(autoSpecialToggleRef, saved.autoSpecialAll == true),
+        unitSpeedBoost = persistToggleBool(unitSpeedBoostToggleRef, saved.unitSpeedBoost == true),
+        unitSpeedMultiplier = math.clamp(
+            tonumber(unitSpeedMultiplierSliderRef and unitSpeedMultiplierSliderRef.Get() or saved.unitSpeedMultiplier) or 150,
+            50, 500
+        ),
     })
     pcall(function()
         if not readfile then
@@ -6171,6 +6207,7 @@ local G = {
     story = 0,
     dungeon = 0,
     shop = 0,
+    foodShop = 0,
     shopRefreshHop = 0,
     fuse = 0,
     summon = 0,
@@ -6197,6 +6234,9 @@ local G = {
     lastShopLobbyHopAt = 0,
     lastFuseHint = 0,
     lastQueueStateHint = 0,
+    focusFire = 0,
+    autoSpecial = 0,
+    unitSpeed = 0,
 }
 
 -- ==================== AUTO BONUS CHESTS ====================
@@ -6555,95 +6595,6 @@ dungeonStartToggleRef = TBattle:Toggle("Auto start dungeon", "Red Visual.Main qu
     persistAll()
 end)
 
-TBattle:Section("Force retry (bypass entry limits)")
-TBattle:Label("Resets client-side entry counters so the queue UI unblocks. Server still lets you play but gives 0 rewards at 0 entries.")
-
-TBattle:Button("🔄", "Reset dungeon entries", "Sets profile.Quests.DungeonEntries back to max (client-side)", nil, function()
-    local pf = getPlayerProfileFolder()
-    if not pf then
-        Win:Notify("Force retry", "Profile not loaded yet.", 3, "warning")
-        return
-    end
-    local questsFolder = pf:FindFirstChild("Quests")
-    local dungeonVal = questsFolder and questsFolder:FindFirstChild("DungeonEntries")
-    if dungeonVal and dungeonVal:IsA("IntValue") then
-        local before = dungeonVal.Value
-        local limit = 3
-        pcall(function()
-            local q = requireSystemsChildModule("Queue")
-            if q and type(q.GetDungeonEntryLimit) == "function" then
-                local ok, v = pcall(q.GetDungeonEntryLimit, q)
-                if ok and tonumber(v) then limit = tonumber(v) end
-            end
-        end)
-        dungeonVal.Value = limit
-        task.defer(refreshDungeonEntriesInfoLabel)
-        Win:Notify("Force retry", ("Dungeon entries: %d → %d (client-side reset)"):format(before, limit), 4, "success")
-        Win:Status(("Dungeon entries reset to %d"):format(limit))
-    else
-        Win:Notify("Force retry", "DungeonEntries not found in profile.Quests", 4, "error")
-    end
-end)
-
-TBattle:Button("🎪", "Reset circus entries", "Deletes profile.Challenges.NightmareCircus so entries refill to 3", nil, function()
-    local pf = getPlayerProfileFolder()
-    if not pf then
-        Win:Notify("Force retry", "Profile not loaded yet.", 3, "warning")
-        return
-    end
-    local challenges = pf:FindFirstChild("Challenges")
-    if not challenges then
-        Win:Notify("Force retry", "Challenges folder not found in profile.", 4, "error")
-        return
-    end
-    local circusFolder = challenges:FindFirstChild("NightmareCircus")
-    if circusFolder then
-        local entries = circusFolder:GetAttribute(1) or circusFolder:GetAttribute("1") or 0
-        pcall(function() circusFolder:Destroy() end)
-        Win:Notify("Force retry", ("Circus entries reset (was %s, now 3) — client-side"):format(tostring(entries)), 4, "success")
-        Win:Status("Nightmare Circus entries reset to 3")
-    else
-        Win:Notify("Force retry", "NightmareCircus already has full entries (no tracker found).", 3, "info")
-    end
-end)
-
-TBattle:Button("♻️", "Reset ALL challenge entries", "Clears all Challenges folders (Circus, hourly waves, etc.) + dungeon entries", nil, function()
-    local pf = getPlayerProfileFolder()
-    if not pf then
-        Win:Notify("Force retry", "Profile not loaded yet.", 3, "warning")
-        return
-    end
-    local count = 0
-    local challenges = pf:FindFirstChild("Challenges")
-    if challenges then
-        for _, ch in ipairs(challenges:GetChildren()) do
-            pcall(function() ch:Destroy() end)
-            count = count + 1
-        end
-    end
-    local questsFolder = pf:FindFirstChild("Quests")
-    local dungeonVal = questsFolder and questsFolder:FindFirstChild("DungeonEntries")
-    if dungeonVal and dungeonVal:IsA("IntValue") then
-        local limit = 3
-        pcall(function()
-            local q = requireSystemsChildModule("Queue")
-            if q and type(q.GetDungeonEntryLimit) == "function" then
-                local ok, v = pcall(q.GetDungeonEntryLimit, q)
-                if ok and tonumber(v) then limit = tonumber(v) end
-            end
-        end)
-        dungeonVal.Value = limit
-        count = count + 1
-    end
-    task.defer(refreshDungeonEntriesInfoLabel)
-    if count > 0 then
-        Win:Notify("Force retry", ("Reset %d entry tracker(s) — client-side"):format(count), 4, "success")
-        Win:Status(("All entry limits reset (%d trackers)"):format(count))
-    else
-        Win:Notify("Force retry", "Nothing to reset — all entries may already be full.", 3, "info")
-    end
-end)
-
 TBattle:Section("Stage vote")
 TBattle:Label("Auto votes Next Stage or Retry Stage when round ends")
 
@@ -6748,6 +6699,208 @@ local function wireFuseUnitDropdowns(unitsTab)
     )
 end
 
+TBattle:Section("Combat boost")
+TBattle:Label("Focus fire = all units target 1 enemy · Auto special = abilities fire on cooldown · Speed = faster walk between enemies")
+
+focusFireToggleRef = TBattle:Toggle("Focus fire (auto-target)", "Fires SetManualTarget every 0.5s — all your units attack the nearest enemy", saved.autoFocusFire, function(on)
+    G.focusFire = G.focusFire + 1
+    local g = G.focusFire
+    if on then
+        Win:Status("Focus fire ON")
+        spawnTracked(function()
+            local unitsRemote = nil
+            pcall(function()
+                local sys = game:GetService("ReplicatedStorage"):FindFirstChild("Systems")
+                unitsRemote = sys and sys:FindFirstChild("Units")
+            end)
+            local setTargetRemote = unitsRemote and unitsRemote:FindFirstChild("SetManualTarget")
+            if not setTargetRemote then
+                Win:Notify("Combat", "SetManualTarget remote not found.", 4, "error")
+                return
+            end
+            while g == G.focusFire and bonusChestUiAlive(UI_RUN_GEN) do
+                pcall(function()
+                    local unitsFolder = workspace:FindFirstChild("Units")
+                    if not unitsFolder then return end
+                    local myTeam = LP:GetAttribute("TeamNum") or 1
+                    local myUnits, enemies = {}, {}
+                    for _, model in ipairs(unitsFolder:GetChildren()) do
+                        if not model:IsA("Model") or not model.PrimaryPart then continue end
+                        local hum = model:FindFirstChildOfClass("Humanoid")
+                        if not hum or hum.Health <= 0 then continue end
+                        local ownerName = model:GetAttribute("OwnerName")
+                        local team = model:GetAttribute("Team") or model:GetAttribute("TeamNum")
+                        if ownerName == LP.Name then
+                            myUnits[#myUnits + 1] = model
+                        elseif team ~= myTeam and not model:GetAttribute("Peaceful") then
+                            enemies[#enemies + 1] = model
+                        end
+                    end
+                    if #enemies == 0 or #myUnits == 0 then return end
+                    local bestEnemy, bestDist = nil, math.huge
+                    local center = Vector3.new(0, 0, 0)
+                    for _, u in ipairs(myUnits) do
+                        center = center + u.PrimaryPart.Position
+                    end
+                    center = center / #myUnits
+                    for _, e in ipairs(enemies) do
+                        local d = (e.PrimaryPart.Position - center).Magnitude
+                        if d < bestDist then
+                            bestDist = d
+                            bestEnemy = e
+                        end
+                    end
+                    if bestEnemy then
+                        pcall(function() setTargetRemote:FireServer(bestEnemy) end)
+                    end
+                end)
+                task.wait(0.5)
+            end
+        end)
+    else
+        Win:Status("Focus fire OFF")
+    end
+    persistAll()
+end)
+
+autoSpecialToggleRef = TBattle:Toggle("Auto special (all units)", "Enables autoSpecial on all your equipped units via SetUnitAutoMode", saved.autoSpecialAll, function(on)
+    G.autoSpecial = G.autoSpecial + 1
+    local g = G.autoSpecial
+    if on then
+        Win:Status("Auto special ON")
+        spawnTracked(function()
+            local profileMod = nil
+            pcall(function() profileMod = requireSystemsChildModule("Profile") end)
+            while g == G.autoSpecial and bonusChestUiAlive(UI_RUN_GEN) do
+                pcall(function()
+                    local unitsFolder = workspace:FindFirstChild("Units")
+                    if not unitsFolder then return end
+                    for _, model in ipairs(unitsFolder:GetChildren()) do
+                        if not model:IsA("Model") then continue end
+                        if model:GetAttribute("OwnerName") ~= LP.Name then continue end
+                        local hum = model:FindFirstChildOfClass("Humanoid")
+                        if not hum or hum.Health <= 0 then continue end
+                        if profileMod and type(profileMod.SetUnitAutoMode) == "function" then
+                            pcall(function() profileMod:SetUnitAutoMode(LP, model, true) end)
+                        else
+                            local rem = nil
+                            pcall(function()
+                                rem = game:GetService("ReplicatedStorage").Systems.Profile.SetUnitAutoMode
+                            end)
+                            if rem then
+                                pcall(function() rem:FireServer(model, true) end)
+                            end
+                        end
+                    end
+                end)
+                task.wait(3)
+            end
+        end)
+    else
+        Win:Status("Auto special OFF")
+    end
+    persistAll()
+end)
+
+unitSpeedBoostToggleRef = TBattle:Toggle("Unit speed boost", "Forces high WalkSpeed + pushes units toward enemies with BodyVelocity", saved.unitSpeedBoost, function(on)
+    G.unitSpeed = G.unitSpeed + 1
+    local g = G.unitSpeed
+    if on then
+        local spd = math.clamp(tonumber(saved.unitSpeedMultiplier) or 150, 50, 500)
+        Win:Status(("Unit speed boost ON (%d studs/s)"):format(spd))
+        local conn
+        conn = addConn(game:GetService("RunService").Heartbeat:Connect(function()
+            if g ~= G.unitSpeed or not bonusChestUiAlive(UI_RUN_GEN) then
+                pcall(function() conn:Disconnect() end)
+                return
+            end
+            local curSpd = 150
+            if unitSpeedMultiplierSliderRef then
+                curSpd = math.clamp(tonumber(unitSpeedMultiplierSliderRef.Get()) or 150, 50, 500)
+            end
+            pcall(function()
+                local unitsFolder = workspace:FindFirstChild("Units")
+                if not unitsFolder then return end
+                local myTeam = LP:GetAttribute("TeamNum") or 1
+                local enemyPositions = {}
+                for _, model in ipairs(unitsFolder:GetChildren()) do
+                    if not model:IsA("Model") or not model.PrimaryPart then continue end
+                    local hum = model:FindFirstChildOfClass("Humanoid")
+                    if not hum or hum.Health <= 0 then continue end
+                    local team = model:GetAttribute("Team") or model:GetAttribute("TeamNum")
+                    if team ~= myTeam and not model:GetAttribute("Peaceful") then
+                        enemyPositions[#enemyPositions + 1] = model.PrimaryPart.Position
+                    end
+                end
+                for _, model in ipairs(unitsFolder:GetChildren()) do
+                    if model:GetAttribute("OwnerName") ~= LP.Name then continue end
+                    if not model:IsA("Model") or not model.PrimaryPart then continue end
+                    local hum = model:FindFirstChildOfClass("Humanoid")
+                    if not hum or hum.Health <= 0 then continue end
+                    hum.WalkSpeed = curSpd
+                    if #enemyPositions > 0 then
+                        local root = model.PrimaryPart
+                        local bestPos, bestDist = nil, math.huge
+                        for _, ep in ipairs(enemyPositions) do
+                            local d = (ep - root.Position).Magnitude
+                            if d < bestDist then
+                                bestDist = d
+                                bestPos = ep
+                            end
+                        end
+                        if bestPos and bestDist > 3 then
+                            local dir = (bestPos - root.Position).Unit
+                            local bv = root:FindFirstChild("_SpeedBoostBV")
+                            if not bv then
+                                bv = Instance.new("BodyVelocity")
+                                bv.Name = "_SpeedBoostBV"
+                                bv.MaxForce = Vector3.new(1e5, 0, 1e5)
+                                bv.P = 1e4
+                                bv.Parent = root
+                            end
+                            bv.Velocity = dir * curSpd
+                        else
+                            local bv = root:FindFirstChild("_SpeedBoostBV")
+                            if bv then bv:Destroy() end
+                        end
+                    end
+                end
+            end)
+        end))
+    else
+        pcall(function()
+            local unitsFolder = workspace:FindFirstChild("Units")
+            if unitsFolder then
+                for _, model in ipairs(unitsFolder:GetChildren()) do
+                    if model:GetAttribute("OwnerName") ~= LP.Name then continue end
+                    pcall(function()
+                        local root = model.PrimaryPart
+                        if root then
+                            local bv = root:FindFirstChild("_SpeedBoostBV")
+                            if bv then bv:Destroy() end
+                        end
+                    end)
+                end
+            end
+        end)
+        Win:Status("Unit speed boost OFF")
+    end
+    persistAll()
+end)
+
+unitSpeedMultiplierSliderRef = TBattle:Slider(
+    "Unit speed (studs/s)",
+    "WalkSpeed + BodyVelocity push toward nearest enemy (50–500)",
+    {
+        min = 50,
+        max = 500,
+        default = math.clamp(tonumber(saved.unitSpeedMultiplier) or 150, 50, 500),
+    },
+    function()
+        persistAll()
+    end
+)
+
 local TUnits = Win:Tab("👥", "Units")
 TUnits:Section("Unit fusion")
 TUnits:Label("Auto: same-star main + 3 inventory fodder (lowest level). Manual: pick main + 3 sacrifices (inventory). Refresh lists after summon / move units.")
@@ -6822,6 +6975,7 @@ TUnits:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time
             maxFodderLevel = fuseFodderMaxInputRef and tonumber(fuseFodderMaxInputRef.Get()) or saved.fuseMaxFodderLevel,
             fuseMainUnitId = type(mainStr) == "string" and mainStr or "",
             fuseSacrificeIds = type(sacStr) == "string" and sacStr or "",
+            fuseExploit = saved.fuseExploit ~= false,
         })
         if ok then
             Win:Notify("Fuse", "Fusion completed.", 3, "success")
@@ -6851,6 +7005,68 @@ TUnits:Button("⚗️", "Fuse once now", "ValidateFusion + PurchaseFuse one time
     end)
 end)
 
+TUnits:Button("🔀", "Fuse with 1 fodder (exploit)", "Server never checks that 3 sacrifice slots are distinct — pass same unit 3×", nil, function()
+    spawnTracked(function()
+        local fusion = getUnitFusionModule()
+        if not fusion or type(fusion.PurchaseFuse) ~= "function" then
+            Win:Notify("FuseExploit", "UnitFusion module not found.", 4, "error")
+            return
+        end
+        local profile = getPlayerProfileFolder()
+        if not profile then
+            Win:Notify("FuseExploit", "Profile not loaded.", 4, "error")
+            return
+        end
+        local equipped = profile:FindFirstChild("Equipped")
+        local invUnits = profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+        local mainStr = ""
+        if fuseMainUnitDropdownRef then
+            local _, v = fuseMainUnitDropdownRef.Get()
+            mainStr = type(v) == "string" and v or ""
+        end
+        if #mainStr == 0 then
+            Win:Notify("FuseExploit", "Select a main unit from the Fuse dropdown first.", 4, "warning")
+            return
+        end
+        local main = (equipped and equipped:FindFirstChild(mainStr)) or (invUnits and invUnits:FindFirstChild(mainStr))
+        if not main then
+            Win:Notify("FuseExploit", "Main unit '" .. mainStr .. "' not found.", 4, "warning")
+            return
+        end
+        local mainStars = main:GetAttribute("StarCount") or 0
+        if mainStars >= 10 then
+            Win:Notify("FuseExploit", mainStr .. " already at max stars (10).", 4, "warning")
+            return
+        end
+        local fodder = nil
+        if invUnits then
+            for _, u in ipairs(invUnits:GetChildren()) do
+                if u == main then continue end
+                if u:GetAttribute("Locked") == true then continue end
+                if (u:GetAttribute("StarCount") or 0) == mainStars then
+                    fodder = u
+                    break
+                end
+            end
+        end
+        if not fodder then
+            Win:Notify("FuseExploit", ("No unlocked ★%d fodder in inventory."):format(mainStars), 5, "warning")
+            return
+        end
+        Win:Status(("Fuse exploit: %s + %s×3 (★%d)…"):format(mainStr, fodder.Name, mainStars))
+        local ok, err = pcall(function()
+            return fusion:PurchaseFuse(LP, main, { fodder, fodder, fodder })
+        end)
+        if ok then
+            Win:Notify("FuseExploit", ("%s → ★%d using only 1 fodder (%s)"):format(mainStr, mainStars + 1, fodder.Name), 5, "success")
+            Win:Status(("Fuse exploit done: %s → ★%d"):format(mainStr, mainStars + 1))
+        else
+            Win:Notify("FuseExploit", "Server rejected: " .. tostring(err), 5, "error")
+            Win:Status("Fuse exploit failed")
+        end
+    end)
+end)
+
 fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile is loaded", saved.autoFuseUnits, function(on)
     G.fuse = G.fuse + 1
     local g = G.fuse
@@ -6863,6 +7079,7 @@ fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile i
                     maxFodderLevel = saved.fuseMaxFodderLevel,
                     fuseMainUnitId = saved.fuseMainUnitId,
                     fuseSacrificeIds = saved.fuseSacrificeIds,
+                    fuseExploit = saved.fuseExploit ~= false,
                 }
                 if getgenv and type(getgenv().BonusChestFuseMinStars) == "number" then
                     o.minStars = getgenv().BonusChestFuseMinStars
@@ -6915,180 +7132,139 @@ fuseToggleRef = TUnits:Toggle("Auto fuse units", "Tries ~every 3s when profile i
     persistAll()
 end)
 
-TUnits:Section("Summon Heroes")
-TUnits:Label("Summon.BuyPack / BuyMythicBanner. First-time tutorial summon may block until done in-game.")
-
-summonPackDropdownRef = TUnits:Dropdown(
-    "Pack",
-    "Mythic uses shards; A/B use gems or tickets",
-    SUMMON_PACK_OPTIONS,
-    summonPackDefaultIndex(saved.summonPack),
-    function()
-        persistAll()
-    end
-)
-
-summonAmountInputRef = TUnits:Input(
-    "Amount (A/B only)",
-    "1–10 rolls per BuyPack",
-    "1",
-    tostring(saved.summonAmount),
-    function()
-        persistAll()
-    end
-)
-
-summonCurrencyDropdownRef = TUnits:Dropdown(
-    "Currency (A/B)",
-    "Ignored for Mythic Banner",
-    SUMMON_CURRENCY_OPTIONS,
-    summonCurrencyDefaultIndex(saved.summonCurrency),
-    function()
-        persistAll()
-    end
-)
-
-summonSellDelayInputRef = TUnits:Input(
-    "Sell delay (sec)",
-    "After PackOpened: wait then sell units matching toggles below",
-    "12",
-    tostring(saved.summonSellDelaySec),
-    function()
-        persistAll()
-    end
-)
-
-TUnits:Label("Match in-game SUMMON “Auto Sell Units” — writes Settings.AutoSell_RarityN.")
-
-sellRareToggleRef = TUnits:Toggle("Auto-sell Rare", "Rarity 3 · AutoSell_Rarity3", saved.autoSellRare, function(on)
-    setAutoSellRarityInGame(3, on)
+fuseExploitToggleRef = TUnits:Toggle("1-fodder fuse exploit", "Uses same unit 3× when < 3 fodder available (no dedup server-side)", saved.fuseExploit ~= false, function(on)
+    saved.fuseExploit = (on == true)
     persistAll()
 end)
 
-sellEpicToggleRef = TUnits:Toggle("Auto-sell Epic", "Rarity 4", saved.autoSellEpic, function(on)
-    setAutoSellRarityInGame(4, on)
-    persistAll()
-end)
+TUnits:Section("Level up")
+TUnits:Label("UnitUpgrades.LevelUnit (feed food items) · UnitUpgrades.BuyLevel (direct, costs Coins). Refresh if list is empty.")
 
-sellLegendaryToggleRef = TUnits:Toggle("Auto-sell Legendary", "Rarity 5", saved.autoSellLegendary, function(on)
-    setAutoSellRarityInGame(5, on)
-    persistAll()
-end)
-
-sellMythicToggleRef = TUnits:Toggle("Auto-sell Mythic", "Rarity 6", saved.autoSellMythic, function(on)
-    setAutoSellRarityInGame(6, on)
-    persistAll()
-end)
-
-TUnits:Button("✨", "Summon once", "BuyPack or BuyMythicBanner once", nil, function()
-    spawnTracked(function()
-        local _, pack = summonPackDropdownRef.Get()
-        local amt = tonumber(summonAmountInputRef.Get()) or 1
-        local _, cur = summonCurrencyDropdownRef.Get()
-        local ok, why = trySummonOnce(type(pack) == "string" and pack or "Pack1", amt, type(cur) == "string" and cur or "Gems")
-        if why == "no_summon" then
-            Win:Notify("Summon Heroes", "Summon module not found.", 4, "error")
-        else
-            Win:Notify("Summon Heroes", "Request sent (check gems / tickets / shards / space).", 3, "success")
-        end
-    end)
-end)
-
-summonToggleRef = TUnits:Toggle("Auto summon heroes", "Every ~1.2s · same as shop button cooldown", saved.autoSummon, function(on)
-    G.summon = G.summon + 1
-    local g = G.summon
-    if on then
-        spawnTracked(function()
-            while g == G.summon and bonusChestUiAlive(UI_RUN_GEN) do
-                local _, pack = summonPackDropdownRef.Get()
-                pack = (type(pack) == "string" and pack) or saved.summonPack
-                if getgenv and type(getgenv().BonusChestSummonPack) == "string" and #getgenv().BonusChestSummonPack > 0 then
-                    pack = getgenv().BonusChestSummonPack
-                end
-                local amt = tonumber(summonAmountInputRef.Get()) or saved.summonAmount
-                if getgenv and type(getgenv().BonusChestSummonAmount) == "number" then
-                    amt = getgenv().BonusChestSummonAmount
-                end
-                local _, cur = summonCurrencyDropdownRef.Get()
-                cur = (type(cur) == "string" and cur) or saved.summonCurrency
-                if getgenv and type(getgenv().BonusChestSummonCurrency) == "string" then
-                    cur = getgenv().BonusChestSummonCurrency
-                end
-                trySummonOnce(pack, amt, cur)
-                task.wait(1.2)
-            end
-        end)
-    else
-        Win:Status("Auto summon heroes OFF")
-    end
-    persistAll()
-end)
-
-local function restartTapSkipOverlayLoop()
-    G.tapSkip = G.tapSkip + 1
-    local g = G.tapSkip
-    local on = extraRefs.tapSkipToggleRef and extraRefs.tapSkipToggleRef.Get and extraRefs.tapSkipToggleRef.Get() == true
-    if getgenv and type(getgenv().BonusChestAutoTapSkip) == "boolean" then
-        on = getgenv().BonusChestAutoTapSkip == true
-    end
-    if not on then
-        return
-    end
-    spawnTracked(function()
-        while g == G.tapSkip and bonusChestUiAlive(UI_RUN_GEN) do
-            local enabledNow = extraRefs.tapSkipToggleRef and extraRefs.tapSkipToggleRef.Get and extraRefs.tapSkipToggleRef.Get() == true
-            if getgenv and type(getgenv().BonusChestAutoTapSkip) == "boolean" then
-                enabledNow = getgenv().BonusChestAutoTapSkip == true
-            end
-            if not enabledNow then
-                break
-            end
-            local btn, tapX, tapY = findTapToSkipButton()
-            if btn or (tapX and tapY) then
-                local didClick = false
-                if btn then
-                    fireGuiButtonClick(btn)
-                    didClick = true
-                end
-                pcall(function()
-                    local vim = game:GetService("VirtualInputManager")
-                    local cam = workspace.CurrentCamera
-                    local vp = cam and cam.ViewportSize
-                    local cx = vp and math.floor((tonumber(vp.X) or 0) * 0.5) or 640
-                    local cy = vp and math.floor((tonumber(vp.Y) or 0) * 0.5) or 360
-                    local x = tapX or cx
-                    local y = tapY or cy
-                    vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
-                    task.wait(0.03)
-                    vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
-                    if didClick == false or (math.abs(x - cx) > 48 or math.abs(y - cy) > 48) then
-                        task.wait(0.02)
-                        vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
-                        task.wait(0.03)
-                        vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
-                    end
-                end)
-                local now = os.clock()
-                if now - (G.lastTapSkip or 0) > 2 then
-                    G.lastTapSkip = now
-                    Win:Status("Skip: tap-to-skip overlay dismissed")
-                end
-            end
-            task.wait(0.15)
-        end
-    end)
+do
+    local lvOpts0 = buildStatTraitUnitOptions()
+    levelUnitDropdownRef = TUnits:Dropdown(
+        "Unit to level",
+        "Pick unit from equipped or inventory",
+        lvOpts0,
+        1,
+        nil
+    )
+    levelUnitTargetLevelInputRef = TUnits:Input(
+        "Target level (BuyLevel)",
+        "BuyLevel: buy directly to this level · costs Coins · must be ≤ your player level",
+        "1",
+        "1"
+    )
 end
 
-extraRefs.tapSkipToggleRef = TUnits:Toggle(
-    "Auto skip tap overlays",
-    "Auto-clicks visible 'Tap anywhere to skip' prompts",
-    saved.autoSkipTapToSkip ~= false,
-    function(on)
-        saved.autoSkipTapToSkip = (on == true)
-        restartTapSkipOverlayLoop()
-        persistAll()
+TUnits:Button("🍬", "Feed all food now", "LevelUnit — feeds all food from Inventory.Food to selected unit", nil, function()
+    local upgrades = getUnitUpgradesModule()
+    if not upgrades or type(upgrades.LevelUnit) ~= "function" then
+        Win:Notify("Level", "UnitUpgrades module not found.", 4, "error")
+        return
     end
-)
+    if not levelUnitDropdownRef then return end
+    local _, unitName = levelUnitDropdownRef.Get()
+    local profile = getPlayerProfileFolder()
+    if not profile then
+        Win:Notify("Level", "Profile not loaded.", 3, "warning")
+        return
+    end
+    local equipped = profile:FindFirstChild("Equipped")
+    local invUnits = profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+    local unit
+    if type(unitName) == "string" and #unitName > 0 then
+        unit = (equipped and equipped:FindFirstChild(unitName)) or (invUnits and invUnits:FindFirstChild(unitName))
+    else
+        local best, bestLv = nil, -1
+        for _, u in ipairs(equipped and equipped:GetChildren() or {}) do
+            local lv = unitAttrLevel(u)
+            if lv > bestLv then best, bestLv = u, lv end
+        end
+        if not best then
+            for _, u in ipairs(invUnits and invUnits:GetChildren() or {}) do
+                local lv = unitAttrLevel(u)
+                if lv > bestLv then best, bestLv = u, lv end
+            end
+        end
+        unit = best
+    end
+    if not unit then
+        Win:Notify("Level", "No unit found — pick one or Refresh.", 3, "warning")
+        return
+    end
+    local invRoot = profile:FindFirstChild("Inventory")
+    local foodFolder = invRoot and invRoot:FindFirstChild("Food")
+    if not foodFolder then
+        Win:Notify("Level", "Food folder not found in profile.", 3, "warning")
+        return
+    end
+    local foodTable = {}
+    for _, f in ipairs(foodFolder:GetChildren()) do
+        local cnt = tonumber(f:GetAttribute("Count")) or 1
+        if cnt > 0 then
+            foodTable[f.Name] = cnt
+        end
+    end
+    if not next(foodTable) then
+        Win:Notify("Level", "No food items in your inventory.", 3, "warning")
+        return
+    end
+    local ok, result = pcall(function() return upgrades:LevelUnit(LP, unit, foodTable) end)
+    if ok and result ~= false then
+        task.defer(refreshSelectedRerollUnitStats)
+        Win:Notify("Level", ("Fed all food to %s ✓"):format(unit.Name), 4, "success")
+        Win:Status(("Level: fed food → %s"):format(unit.Name))
+    else
+        Win:Notify("Level", "LevelUnit failed (player level cap / invalid food).", 4, "warning")
+    end
+end)
+
+TUnits:Button("💰", "Buy level now", "BuyLevel — buy to target level directly with Coins", nil, function()
+    local upgrades = getUnitUpgradesModule()
+    if not upgrades or type(upgrades.BuyLevel) ~= "function" then
+        Win:Notify("BuyLevel", "UnitUpgrades module not found.", 4, "error")
+        return
+    end
+    if not levelUnitDropdownRef then return end
+    local _, unitName = levelUnitDropdownRef.Get()
+    if type(unitName) ~= "string" or #unitName == 0 then
+        Win:Notify("BuyLevel", "Select a unit first.", 3, "warning")
+        return
+    end
+    local profile = getPlayerProfileFolder()
+    if not profile then
+        Win:Notify("BuyLevel", "Profile not loaded.", 3, "warning")
+        return
+    end
+    local equipped = profile:FindFirstChild("Equipped")
+    local invUnits = profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+    local unit = (equipped and equipped:FindFirstChild(unitName)) or (invUnits and invUnits:FindFirstChild(unitName))
+    if not unit then
+        Win:Notify("BuyLevel", "Unit '" .. unitName .. "' not found.", 3, "warning")
+        return
+    end
+    local targetLvRaw = levelUnitTargetLevelInputRef and levelUnitTargetLevelInputRef.Get()
+    local targetLv = math.floor(tonumber(targetLvRaw) or 0)
+    if targetLv < 1 then
+        Win:Notify("BuyLevel", "Enter a valid target level ≥ 1.", 3, "warning")
+        return
+    end
+    local currentLv = unitAttrLevel(unit)
+    if targetLv == currentLv then
+        Win:Notify("BuyLevel", ("Unit is already level %d."):format(currentLv), 3, "info")
+        return
+    end
+    local ok, result = pcall(function() return upgrades:BuyLevel(LP, unit, targetLv) end)
+    if ok and result == true then
+        task.defer(refreshSelectedRerollUnitStats)
+        Win:Notify("BuyLevel", ("Bought Lv%d for %s ✓"):format(targetLv, unit.Name), 4, "success")
+        Win:Status(("BuyLevel: %s → Lv%d"):format(unit.Name, targetLv))
+    else
+        Win:Notify("BuyLevel", "BuyLevel failed — not enough Coins or player level too low.", 4, "warning")
+    end
+end)
+
 
 TUnits:Section("Unit management")
 TUnits:Label("Inventory.BuySlotIncrease (+20 slots · 400 Gems) · SetUnitLocked toggle. Refresh after equip changes.")
@@ -7187,6 +7363,182 @@ TUnits:Button("🔓", "Unlock selected unit", "SetUnitLocked — removes Locked 
 end)
 
 local TShop = Win:Tab("🏪", "Shop")
+TShop:Section("Summon Heroes")
+TShop:Label("BuyPack / BuyMythicBanner. First-time tutorial summon may block until done in-game.")
+
+summonPackDropdownRef = TShop:Dropdown(
+    "Pack",
+    "Mythic uses shards; A/B use gems or tickets",
+    SUMMON_PACK_OPTIONS,
+    summonPackDefaultIndex(saved.summonPack),
+    function()
+        persistAll()
+    end
+)
+
+summonAmountInputRef = TShop:Input(
+    "Amount (A/B only)",
+    "1–10 rolls per BuyPack",
+    "1",
+    tostring(saved.summonAmount),
+    function()
+        persistAll()
+    end
+)
+
+summonCurrencyDropdownRef = TShop:Dropdown(
+    "Currency (A/B)",
+    "Ignored for Mythic Banner",
+    SUMMON_CURRENCY_OPTIONS,
+    summonCurrencyDefaultIndex(saved.summonCurrency),
+    function()
+        persistAll()
+    end
+)
+
+summonSellDelayInputRef = TShop:Input(
+    "Sell delay (sec)",
+    "After PackOpened: wait then sell units matching toggles below",
+    "12",
+    tostring(saved.summonSellDelaySec),
+    function()
+        persistAll()
+    end
+)
+
+TShop:Label("Match in-game SUMMON “Auto Sell Units” — writes Settings.AutoSell_RarityN.")
+
+sellRareToggleRef = TShop:Toggle("Auto-sell Rare", "Rarity 3 · AutoSell_Rarity3", saved.autoSellRare, function(on)
+    setAutoSellRarityInGame(3, on)
+    persistAll()
+end)
+
+sellEpicToggleRef = TShop:Toggle("Auto-sell Epic", "Rarity 4", saved.autoSellEpic, function(on)
+    setAutoSellRarityInGame(4, on)
+    persistAll()
+end)
+
+sellLegendaryToggleRef = TShop:Toggle("Auto-sell Legendary", "Rarity 5", saved.autoSellLegendary, function(on)
+    setAutoSellRarityInGame(5, on)
+    persistAll()
+end)
+
+sellMythicToggleRef = TShop:Toggle("Auto-sell Mythic", "Rarity 6", saved.autoSellMythic, function(on)
+    setAutoSellRarityInGame(6, on)
+    persistAll()
+end)
+
+TShop:Button("✨", "Summon once", "BuyPack or BuyMythicBanner once", nil, function()
+    spawnTracked(function()
+        local _, pack = summonPackDropdownRef.Get()
+        local amt = tonumber(summonAmountInputRef.Get()) or 1
+        local _, cur = summonCurrencyDropdownRef.Get()
+        local ok, why = trySummonOnce(type(pack) == "string" and pack or "Pack1", amt, type(cur) == "string" and cur or "Gems")
+        if why == "no_summon" then
+            Win:Notify("Summon Heroes", "Summon module not found.", 4, "error")
+        else
+            Win:Notify("Summon Heroes", "Request sent (check gems / tickets / shards / space).", 3, "success")
+        end
+    end)
+end)
+
+summonToggleRef = TShop:Toggle("Auto summon heroes", "Every ~1.2s · same as shop button cooldown", saved.autoSummon, function(on)
+    G.summon = G.summon + 1
+    local g = G.summon
+    if on then
+        spawnTracked(function()
+            while g == G.summon and bonusChestUiAlive(UI_RUN_GEN) do
+                local _, pack = summonPackDropdownRef.Get()
+                pack = (type(pack) == "string" and pack) or saved.summonPack
+                if getgenv and type(getgenv().BonusChestSummonPack) == "string" and #getgenv().BonusChestSummonPack > 0 then
+                    pack = getgenv().BonusChestSummonPack
+                end
+                local amt = tonumber(summonAmountInputRef.Get()) or saved.summonAmount
+                if getgenv and type(getgenv().BonusChestSummonAmount) == "number" then
+                    amt = getgenv().BonusChestSummonAmount
+                end
+                local _, cur = summonCurrencyDropdownRef.Get()
+                cur = (type(cur) == "string" and cur) or saved.summonCurrency
+                if getgenv and type(getgenv().BonusChestSummonCurrency) == "string" then
+                    cur = getgenv().BonusChestSummonCurrency
+                end
+                trySummonOnce(pack, amt, cur)
+                task.wait(1.2)
+            end
+        end)
+    else
+        Win:Status("Auto summon heroes OFF")
+    end
+    persistAll()
+end)
+
+local function restartTapSkipOverlayLoop()
+    G.tapSkip = G.tapSkip + 1
+    local g = G.tapSkip
+    local on = extraRefs.tapSkipToggleRef and extraRefs.tapSkipToggleRef.Get and extraRefs.tapSkipToggleRef.Get() == true
+    if getgenv and type(getgenv().BonusChestAutoTapSkip) == "boolean" then
+        on = getgenv().BonusChestAutoTapSkip == true
+    end
+    if not on then
+        return
+    end
+    spawnTracked(function()
+        while g == G.tapSkip and bonusChestUiAlive(UI_RUN_GEN) do
+            local enabledNow = extraRefs.tapSkipToggleRef and extraRefs.tapSkipToggleRef.Get and extraRefs.tapSkipToggleRef.Get() == true
+            if getgenv and type(getgenv().BonusChestAutoTapSkip) == "boolean" then
+                enabledNow = getgenv().BonusChestAutoTapSkip == true
+            end
+            if not enabledNow then
+                break
+            end
+            local btn, tapX, tapY = findTapToSkipButton()
+            if btn or (tapX and tapY) then
+                local didClick = false
+                if btn then
+                    fireGuiButtonClick(btn)
+                    didClick = true
+                end
+                pcall(function()
+                    local vim = game:GetService("VirtualInputManager")
+                    local cam = workspace.CurrentCamera
+                    local vp = cam and cam.ViewportSize
+                    local cx = vp and math.floor((tonumber(vp.X) or 0) * 0.5) or 640
+                    local cy = vp and math.floor((tonumber(vp.Y) or 0) * 0.5) or 360
+                    local x = tapX or cx
+                    local y = tapY or cy
+                    vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                    task.wait(0.03)
+                    vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+                    if didClick == false or (math.abs(x - cx) > 48 or math.abs(y - cy) > 48) then
+                        task.wait(0.02)
+                        vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
+                        task.wait(0.03)
+                        vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+                    end
+                end)
+                local now = os.clock()
+                if now - (G.lastTapSkip or 0) > 2 then
+                    G.lastTapSkip = now
+                    Win:Status("Skip: tap-to-skip overlay dismissed")
+                end
+            end
+            task.wait(0.15)
+        end
+    end)
+end
+
+extraRefs.tapSkipToggleRef = TShop:Toggle(
+    "Auto skip tap overlays",
+    "Auto-clicks visible 'Tap anywhere to skip' prompts",
+    saved.autoSkipTapToSkip ~= false,
+    function(on)
+        saved.autoSkipTapToSkip = (on == true)
+        restartTapSkipOverlayLoop()
+        persistAll()
+    end
+)
+
+
 TShop:Section("Rotating shops")
 TShop:Label("RotatingShops.BuyItem · multi-select updates from live shop items · * = any in stock.")
 
@@ -7337,9 +7689,9 @@ rotatingShopDelaySliderRef = TShop:Slider(
     "Buy delay (sec)",
     "Delay between each BuyItem call (lower = faster)",
     {
-        min = 0.1,
+        min = 0.05,
         max = 1.5,
-        default = math.clamp(tonumber(saved.rotatingShopBuyDelaySec) or 1.05, 0.1, 1.5),
+        default = math.clamp(tonumber(saved.rotatingShopBuyDelaySec) or 0.15, 0.05, 1.5),
         format = function(v)
             return string.format("%.2fs", v)
         end,
@@ -7422,7 +7774,7 @@ task.defer(function()
     refreshRotatingShopItemsUi(true)
 end)
 
-rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · delay configurable below (0.1–1.5s)", saved.autoBuyRotatingShop, function(on)
+rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Fast loop · per-item delay configurable below", saved.autoBuyRotatingShop, function(on)
     G.shop = G.shop + 1
     local g = G.shop
     if on then
@@ -7499,11 +7851,76 @@ rotatingShopToggleRef = TShop:Toggle("Auto buy rotating shop", "Every ~2s · del
                         Win:Status("Shop: no item list — wrong shop key or API changed")
                     end
                 end
-                task.wait(2)
+                task.wait(0.5)
             end
         end)
     else
         Win:Status("Rotating shop auto-buy OFF")
+    end
+    persistAll()
+end)
+
+autoBuyFoodToggleRef = TShop:Toggle("Auto buy food only", "Buys all Category=Food items from ItemShop · fast loop", saved.autoBuyFood, function(on)
+    G.foodShop = G.foodShop + 1
+    local g = G.foodShop
+    if on then
+        spawnTracked(function()
+            while g == G.foodShop and bonusChestUiAlive(UI_RUN_GEN) do
+                local rotMod, buyEv = resolveRotatingShopsBuy()
+                if not buyEv then
+                    local t = os.clock()
+                    if t - (G.lastFoodShopHint or 0) > 10 then
+                        G.lastFoodShopHint = t
+                        Win:Status("Food shop: BuyItem remote not found")
+                    end
+                    task.wait(1)
+                    continue
+                end
+                local items = getItemsModule()
+                local shopKey = "ItemShop"
+                if saved.rotatingShopAutoDetectKey ~= false then
+                    local detected = detectRotatingShopKey(shopKey)
+                    if type(detected) == "string" and #detected > 0 then
+                        shopKey = detected
+                    end
+                end
+                local shopItems = rotMod and rotatingShopGetItems(rotMod, shopKey)
+                if type(shopItems) ~= "table" then
+                    task.wait(1)
+                    continue
+                end
+                local bought = 0
+                for i = 1, 32 do
+                    local entry = shopItems[i] or shopItems[tostring(i)]
+                    if type(entry) ~= "table" then continue end
+                    local iname = entry.ItemName or entry.Name or entry.Id
+                    if type(iname) ~= "string" then continue end
+                    local isFood = false
+                    if items and type(items.GetItemData) == "function" then
+                        local ok, d = pcall(function() return items:GetItemData(iname) end)
+                        if ok and type(d) == "table" and d.Category == "Food" then
+                            isFood = true
+                        end
+                    end
+                    if not isFood then continue end
+                    if not rotatingShopHasStock(rotMod, shopKey, i) then continue end
+                    local price, cType = entryPriceAndCurrency(entry)
+                    if price and cType then
+                        local cur = getCurrencyModule()
+                        if not currencyCanAfford(cur, LP, price, cType) then continue end
+                    end
+                    fireShopBuy(buyEv, shopKey, i)
+                    bought = bought + 1
+                    task.wait(0.1)
+                end
+                if bought > 0 then
+                    Win:Notify("FoodShop", ("Bought %d food item(s)"):format(bought), 3, "success")
+                end
+                task.wait(0.3)
+            end
+        end)
+    else
+        Win:Status("Auto buy food OFF")
     end
     persistAll()
 end)
@@ -7562,13 +7979,17 @@ statRerollModeDropdownRef = TRoll:Dropdown(
 
 statRerollStopTierDropdownRef = TRoll:Dropdown(
     "Stop at tier (auto)",
-    "Auto stops when all unlocked stats are at or above this tier (supports S/X/EX)",
+    "Auto stops when all unlocked stats reach this tier · X is the best (3% chance per stat per roll)",
     STAT_REROLL_STOP_TIER_OPTIONS,
     statRerollStopTierDefaultIndex(saved.statRerollStopTier),
     function()
         persistAll()
     end
 )
+
+statRerollSmartLockToggleRef = TRoll:Toggle("Smart auto-lock", "When a stat reaches the stop tier, auto-lock it and keep rolling the rest · ~132 rolls for all X vs millions", saved.statRerollSmartLock ~= false, function()
+    persistAll()
+end)
 
 statRerollLockAtkToggleRef = TRoll:Toggle("Lock Attack", "Same as in-game lock (higher reroll cost)", saved.statRerollLockAttack, function()
     persistAll()
@@ -7643,13 +8064,14 @@ TRoll:Button("🎲", "Reroll once", "BuyStatReroll then UseNew or KeepCurrent pe
     end)
 end)
 
-statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls or toggle off", saved.autoStatReroll, function(on)
+statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls or toggle off · smart lock = auto-locks each stat when it hits target", saved.autoStatReroll, function(on)
     G.statReroll = G.statReroll + 1
     local g = G.statReroll
     if on then
         Win:Status("Auto stat reroll ON")
         spawnTracked(function()
             local rolls = 0
+            local smartLockedStats = {}
             while g == G.statReroll and bonusChestUiAlive(UI_RUN_GEN) do
                 local maxR = tonumber(statRerollMaxRollsInputRef.Get()) or saved.statRerollMaxRolls
                 if getgenv and type(getgenv().BonusChestStatRerollMaxRolls) == "number" then
@@ -7671,12 +8093,6 @@ statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls 
                     end
                     return ""
                 end)()
-                local lockedList = buildStatRerollLockedList(
-                    statRerollLockAtkToggleRef.Get(),
-                    statRerollLockHpToggleRef.Get(),
-                    statRerollLockCdToggleRef.Get(),
-                    statRerollLockSpdToggleRef.Get()
-                )
                 local stopTier = (function()
                     local s = saved.statRerollStopTier
                     if statRerollStopTierDropdownRef and type(statRerollStopTierDropdownRef.Get) == "function" then
@@ -7690,19 +8106,61 @@ statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls 
                     end
                     return normalizeStatTierToken(s)
                 end)()
-                local preUnit = resolveStatRerollUnit(unitFilter)
-                if preUnit and statRerollReachedTargetTier(preUnit, lockedList, stopTier) then
+                local smartLockOn = (statRerollSmartLockToggleRef and statRerollSmartLockToggleRef.Get() or saved.statRerollSmartLock) == true
+                local lockAtk = statRerollLockAtkToggleRef.Get()
+                local lockHp = statRerollLockHpToggleRef.Get()
+                local lockCd = statRerollLockCdToggleRef.Get()
+                local lockSpd = statRerollLockSpdToggleRef.Get()
+                if smartLockOn and stopTier ~= "OFF" then
+                    local preUnit = resolveStatRerollUnit(unitFilter)
+                    if preUnit then
+                        local curves = getCurvesModule()
+                        local targetScore = statLetterScore(stopTier, curves)
+                        local statToToggle = {
+                            Attack = { ref = statRerollLockAtkToggleRef, flag = "lockAtk" },
+                            Health = { ref = statRerollLockHpToggleRef, flag = "lockHp" },
+                            Cooldown = { ref = statRerollLockCdToggleRef, flag = "lockCd" },
+                            Speed = { ref = statRerollLockSpdToggleRef, flag = "lockSpd" },
+                        }
+                        local flagVars = { lockAtk = lockAtk, lockHp = lockHp, lockCd = lockCd, lockSpd = lockSpd }
+                        for _, statKey in ipairs(STAT_REROLL_KEYS) do
+                            if not smartLockedStats[statKey] then
+                                local letter = getUnitStatLetter(preUnit, statKey)
+                                if letter and statLetterScore(letter, curves) >= targetScore then
+                                    smartLockedStats[statKey] = true
+                                    local info = statToToggle[statKey]
+                                    if info then
+                                        pcall(function() info.ref.Set(true) end)
+                                        flagVars[info.flag] = true
+                                    end
+                                    Win:Status(("Smart lock: %s reached %s — locked"):format(statKey, letter))
+                                end
+                            end
+                        end
+                        lockAtk = flagVars.lockAtk
+                        lockHp = flagVars.lockHp
+                        lockCd = flagVars.lockCd
+                        lockSpd = flagVars.lockSpd
+                    end
+                end
+                local lockedList = buildStatRerollLockedList(lockAtk, lockHp, lockCd, lockSpd)
+                if statRerollReachedTargetTier(resolveStatRerollUnit(unitFilter), lockedList, stopTier) then
                     statRerollToggleRef.Set(false)
-                    Win:Notify("Stat reroll", ("Reached target tier %s — auto stopped."):format(stopTier), 4, "success")
+                    local done = {}
+                    for k, _ in pairs(smartLockedStats) do done[#done + 1] = k end
+                    Win:Notify("Stat reroll", ("All stats reached %s in %d rolls! Locked: %s"):format(stopTier, rolls, #done > 0 and table.concat(done, ", ") or "none"), 6, "success")
+                    persistAll()
+                    break
+                end
+                local unlocked = getStatRerollUnlockedKeys(lockedList)
+                if #unlocked == 0 then
+                    statRerollToggleRef.Set(false)
+                    Win:Notify("Stat reroll", "All 4 stats are locked — nothing left to roll.", 3, "info")
                     persistAll()
                     break
                 end
                 local _, mode = statRerollModeDropdownRef.Get()
                 local modeStr = (mode == "better" and "better") or "always"
-                local lockAtk = statRerollLockAtkToggleRef.Get()
-                local lockHp = statRerollLockHpToggleRef.Get()
-                local lockCd = statRerollLockCdToggleRef.Get()
-                local lockSpd = statRerollLockSpdToggleRef.Get()
                 local ok, why = tryStatRerollOnce({
                     unitNameFilter = unitFilter,
                     lockAtk = lockAtk,
@@ -7714,13 +8172,11 @@ statRerollToggleRef = TRoll:Toggle("Auto stat reroll", "Repeats until max rolls 
                 task.defer(refreshSelectedRerollUnitStats)
                 if ok then
                     rolls = rolls + 1
-                end
-                local postUnit = resolveStatRerollUnit(unitFilter)
-                if postUnit and statRerollReachedTargetTier(postUnit, lockedList, stopTier) then
-                    statRerollToggleRef.Set(false)
-                    Win:Notify("Stat reroll", ("Reached target tier %s — auto stopped."):format(stopTier), 4, "success")
-                    persistAll()
-                    break
+                    if rolls % 10 == 0 then
+                        local locked4 = {}
+                        for k, _ in pairs(smartLockedStats) do locked4[#locked4 + 1] = k end
+                        Win:Status(("Stat reroll: %d rolls · %d/4 stats locked"):format(rolls, #locked4))
+                    end
                 end
                 if why == "no_module" or why == "no_unit" or why == "no_match" or why == "all_locked" then
                     Win:Status("Stat reroll: " .. tostring(why))
@@ -7948,134 +8404,6 @@ traitRerollToggleRef = TRoll:Toggle("Auto trait reroll", "Until goal: stops when
         Win:Status("Auto trait reroll OFF")
     end
     persistAll()
-end)
-
-TRoll:Section("Level up")
-TRoll:Label("UnitUpgrades.LevelUnit (feed food items) · UnitUpgrades.BuyLevel (direct, costs Coins). Refresh if list is empty.")
-
-do
-    local lvOpts0 = buildStatTraitUnitOptions()
-    levelUnitDropdownRef = TRoll:Dropdown(
-        "Unit to level",
-        "Pick unit from equipped or inventory",
-        lvOpts0,
-        1,
-        nil
-    )
-    levelUnitTargetLevelInputRef = TRoll:Input(
-        "Target level (BuyLevel)",
-        "BuyLevel: buy directly to this level · costs Coins · must be ≤ your player level",
-        "1",
-        "1"
-    )
-end
-
-TRoll:Button("🍬", "Feed all food now", "LevelUnit — feeds all food from Inventory.Food to selected unit", nil, function()
-    local upgrades = getUnitUpgradesModule()
-    if not upgrades or type(upgrades.LevelUnit) ~= "function" then
-        Win:Notify("Level", "UnitUpgrades module not found.", 4, "error")
-        return
-    end
-    if not levelUnitDropdownRef then return end
-    local _, unitName = levelUnitDropdownRef.Get()
-    local profile = getPlayerProfileFolder()
-    if not profile then
-        Win:Notify("Level", "Profile not loaded.", 3, "warning")
-        return
-    end
-    local equipped = profile:FindFirstChild("Equipped")
-    local invUnits = profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
-    local unit
-    if type(unitName) == "string" and #unitName > 0 then
-        unit = (equipped and equipped:FindFirstChild(unitName)) or (invUnits and invUnits:FindFirstChild(unitName))
-    else
-        local best, bestLv = nil, -1
-        for _, u in ipairs(equipped and equipped:GetChildren() or {}) do
-            local lv = unitAttrLevel(u)
-            if lv > bestLv then best, bestLv = u, lv end
-        end
-        if not best then
-            for _, u in ipairs(invUnits and invUnits:GetChildren() or {}) do
-                local lv = unitAttrLevel(u)
-                if lv > bestLv then best, bestLv = u, lv end
-            end
-        end
-        unit = best
-    end
-    if not unit then
-        Win:Notify("Level", "No unit found — pick one or Refresh.", 3, "warning")
-        return
-    end
-    local invRoot = profile:FindFirstChild("Inventory")
-    local foodFolder = invRoot and invRoot:FindFirstChild("Food")
-    if not foodFolder then
-        Win:Notify("Level", "Food folder not found in profile.", 3, "warning")
-        return
-    end
-    local foodTable = {}
-    for _, f in ipairs(foodFolder:GetChildren()) do
-        local cnt = tonumber(f:GetAttribute("Count")) or 1
-        if cnt > 0 then
-            foodTable[f.Name] = cnt
-        end
-    end
-    if not next(foodTable) then
-        Win:Notify("Level", "No food items in your inventory.", 3, "warning")
-        return
-    end
-    local ok, result = pcall(function() return upgrades:LevelUnit(LP, unit, foodTable) end)
-    if ok and result ~= false then
-        task.defer(refreshSelectedRerollUnitStats)
-        Win:Notify("Level", ("Fed all food to %s ✓"):format(unit.Name), 4, "success")
-        Win:Status(("Level: fed food → %s"):format(unit.Name))
-    else
-        Win:Notify("Level", "LevelUnit failed (player level cap / invalid food).", 4, "warning")
-    end
-end)
-
-TRoll:Button("💰", "Buy level now", "BuyLevel — buy to target level directly with Coins", nil, function()
-    local upgrades = getUnitUpgradesModule()
-    if not upgrades or type(upgrades.BuyLevel) ~= "function" then
-        Win:Notify("BuyLevel", "UnitUpgrades module not found.", 4, "error")
-        return
-    end
-    if not levelUnitDropdownRef then return end
-    local _, unitName = levelUnitDropdownRef.Get()
-    if type(unitName) ~= "string" or #unitName == 0 then
-        Win:Notify("BuyLevel", "Select a unit first.", 3, "warning")
-        return
-    end
-    local profile = getPlayerProfileFolder()
-    if not profile then
-        Win:Notify("BuyLevel", "Profile not loaded.", 3, "warning")
-        return
-    end
-    local equipped = profile:FindFirstChild("Equipped")
-    local invUnits = profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
-    local unit = (equipped and equipped:FindFirstChild(unitName)) or (invUnits and invUnits:FindFirstChild(unitName))
-    if not unit then
-        Win:Notify("BuyLevel", "Unit '" .. unitName .. "' not found.", 3, "warning")
-        return
-    end
-    local targetLvRaw = levelUnitTargetLevelInputRef and levelUnitTargetLevelInputRef.Get()
-    local targetLv = math.floor(tonumber(targetLvRaw) or 0)
-    if targetLv < 1 then
-        Win:Notify("BuyLevel", "Enter a valid target level ≥ 1.", 3, "warning")
-        return
-    end
-    local currentLv = unitAttrLevel(unit)
-    if targetLv == currentLv then
-        Win:Notify("BuyLevel", ("Unit is already level %d."):format(currentLv), 3, "info")
-        return
-    end
-    local ok, result = pcall(function() return upgrades:BuyLevel(LP, unit, targetLv) end)
-    if ok and result == true then
-        task.defer(refreshSelectedRerollUnitStats)
-        Win:Notify("BuyLevel", ("Bought Lv%d for %s ✓"):format(targetLv, unit.Name), 4, "success")
-        Win:Status(("BuyLevel: %s → Lv%d"):format(unit.Name, targetLv))
-    else
-        Win:Notify("BuyLevel", "BuyLevel failed — not enough Coins or player level too low.", 4, "warning")
-    end
 end)
 
 refreshProfileUnitDropdowns = function()
@@ -8434,6 +8762,202 @@ local function startQueueStateListenerLoop()
     end)
 end
 
+local TExploits = Win:Tab("💥", "Exploits")
+TExploits:Section("Force retry (bypass entry limits)")
+TExploits:Label("Resets client-side entry counters so the queue UI unblocks. Server still lets you play but gives 0 rewards at 0 entries.")
+
+TExploits:Button("🔄", "Reset dungeon entries", "Sets profile.Quests.DungeonEntries back to max (client-side)", nil, function()
+    local pf = getPlayerProfileFolder()
+    if not pf then
+        Win:Notify("Force retry", "Profile not loaded yet.", 3, "warning")
+        return
+    end
+    local questsFolder = pf:FindFirstChild("Quests")
+    local dungeonVal = questsFolder and questsFolder:FindFirstChild("DungeonEntries")
+    if dungeonVal and dungeonVal:IsA("IntValue") then
+        local before = dungeonVal.Value
+        local limit = 3
+        pcall(function()
+            local q = requireSystemsChildModule("Queue")
+            if q and type(q.GetDungeonEntryLimit) == "function" then
+                local ok, v = pcall(q.GetDungeonEntryLimit, q)
+                if ok and tonumber(v) then limit = tonumber(v) end
+            end
+        end)
+        dungeonVal.Value = limit
+        task.defer(refreshDungeonEntriesInfoLabel)
+        Win:Notify("Force retry", ("Dungeon entries: %d → %d (client-side reset)"):format(before, limit), 4, "success")
+        Win:Status(("Dungeon entries reset to %d"):format(limit))
+    else
+        Win:Notify("Force retry", "DungeonEntries not found in profile.Quests", 4, "error")
+    end
+end)
+
+TExploits:Button("🎪", "Reset circus entries", "Deletes profile.Challenges.NightmareCircus so entries refill to 3", nil, function()
+    local pf = getPlayerProfileFolder()
+    if not pf then
+        Win:Notify("Force retry", "Profile not loaded yet.", 3, "warning")
+        return
+    end
+    local challenges = pf:FindFirstChild("Challenges")
+    if not challenges then
+        Win:Notify("Force retry", "Challenges folder not found in profile.", 4, "error")
+        return
+    end
+    local circusFolder = challenges:FindFirstChild("NightmareCircus")
+    if circusFolder then
+        local entries = circusFolder:GetAttribute(1) or circusFolder:GetAttribute("1") or 0
+        pcall(function() circusFolder:Destroy() end)
+        Win:Notify("Force retry", ("Circus entries reset (was %s, now 3) — client-side"):format(tostring(entries)), 4, "success")
+        Win:Status("Nightmare Circus entries reset to 3")
+    else
+        Win:Notify("Force retry", "NightmareCircus already has full entries (no tracker found).", 3, "info")
+    end
+end)
+
+TExploits:Button("♻️", "Reset ALL challenge entries", "Clears all Challenges folders (Circus, hourly waves, etc.) + dungeon entries", nil, function()
+    local pf = getPlayerProfileFolder()
+    if not pf then
+        Win:Notify("Force retry", "Profile not loaded yet.", 3, "warning")
+        return
+    end
+    local count = 0
+    local challenges = pf:FindFirstChild("Challenges")
+    if challenges then
+        for _, ch in ipairs(challenges:GetChildren()) do
+            pcall(function() ch:Destroy() end)
+            count = count + 1
+        end
+    end
+    local questsFolder = pf:FindFirstChild("Quests")
+    local dungeonVal = questsFolder and questsFolder:FindFirstChild("DungeonEntries")
+    if dungeonVal and dungeonVal:IsA("IntValue") then
+        local limit = 3
+        pcall(function()
+            local q = requireSystemsChildModule("Queue")
+            if q and type(q.GetDungeonEntryLimit) == "function" then
+                local ok, v = pcall(q.GetDungeonEntryLimit, q)
+                if ok and tonumber(v) then limit = tonumber(v) end
+            end
+        end)
+        dungeonVal.Value = limit
+        count = count + 1
+    end
+    task.defer(refreshDungeonEntriesInfoLabel)
+    if count > 0 then
+        Win:Notify("Force retry", ("Reset %d entry tracker(s) — client-side"):format(count), 4, "success")
+        Win:Status(("All entry limits reset (%d trackers)"):format(count))
+    else
+        Win:Notify("Force retry", "Nothing to reset — all entries may already be full.", 3, "info")
+    end
+end)
+
+TExploits:Section("Coin multiply sell")
+TExploits:Label("SellItems exploit — sells the lowest-rarity unlocked unit N× in one call. Server counts price per ref before destroying.")
+
+sellDupeTimesInputRef = TExploits:Input(
+    "Sell count (N)",
+    "How many times the same unit appears in the sell array",
+    "100",
+    nil,
+    function() end
+)
+
+TExploits:Button("💰", "Sell lowest unit N×", "Finds lowest rarity unlocked unit in Inventory.Units, sends it N times to SellItems", nil, function()
+    local inv = getInventoryModule()
+    local items = getItemsModule()
+    if not inv or type(inv.SellItems) ~= "function" then
+        Win:Notify("CoinSell", "Inventory module not loaded.", 4, "error")
+        return
+    end
+    if not items or type(items.GetItemData) ~= "function" then
+        Win:Notify("CoinSell", "Items module not loaded.", 4, "error")
+        return
+    end
+    local profile = getPlayerProfileFolder()
+    local invUnits = profile and profile:FindFirstChild("Inventory") and profile.Inventory:FindFirstChild("Units")
+    if not invUnits then
+        Win:Notify("CoinSell", "Inventory.Units folder not found.", 4, "error")
+        return
+    end
+    local n = 100
+    if sellDupeTimesInputRef and type(sellDupeTimesInputRef.Get) == "function" then
+        local raw = sellDupeTimesInputRef.Get()
+        local parsed = tonumber(raw)
+        if parsed and parsed >= 1 then
+            n = math.floor(parsed)
+        end
+    end
+    local bestUnit, bestRarity = nil, math.huge
+    for _, u in ipairs(invUnits:GetChildren()) do
+        if u:GetAttribute("Locked") == true then continue end
+        local d = nil
+        pcall(function() d = items:GetItemData(u.Name) end)
+        local r = d and tonumber(d.Rarity) or nil
+        if r and r < bestRarity then
+            bestRarity = r
+            bestUnit = u
+        end
+    end
+    if not bestUnit then
+        Win:Notify("CoinSell", "No unlocked units found in inventory.", 4, "warning")
+        return
+    end
+    local arr = table.create(n)
+    for i = 1, n do
+        arr[i] = bestUnit
+    end
+    Win:Status(("Selling %s (★%d) ×%d …"):format(bestUnit.Name, bestRarity, n))
+    local ok, err = pcall(function() inv:SellItems(LP, arr) end)
+    if ok then
+        Win:Notify("CoinSell", ("Sold %s ×%d — coins multiplied"):format(bestUnit.Name, n), 5, "success")
+        Win:Status(("CoinSell done: %s ×%d"):format(bestUnit.Name, n))
+    else
+        Win:Notify("CoinSell", "Error: " .. tostring(err), 5, "error")
+        Win:Status("CoinSell failed")
+    end
+end)
+
+
+TExploits:Section("Server hop")
+TExploits:Label("AntiAFK remote → TeleportAsync to a fresh reserved server. No cooldown, no validation.")
+
+TExploits:Button("🔄", "Server hop (instant)", "Fires AntiAFK remote — teleports to new reserved server", nil, function()
+    local afkRemote = nil
+    pcall(function()
+        afkRemote = game:GetService("ReplicatedStorage").Systems.PVP.AntiAFK
+    end)
+    if not afkRemote then
+        pcall(function()
+            local systems = game:GetService("ReplicatedStorage"):FindFirstChild("Systems")
+            if systems then
+                local pvp = systems:FindFirstChild("PVP")
+                if pvp then
+                    afkRemote = pvp:FindFirstChild("AntiAFK")
+                end
+            end
+        end)
+    end
+    if not afkRemote then
+        pcall(function()
+            for _, child in game:GetService("ReplicatedStorage"):GetDescendants() do
+                if child.Name == "AntiAFK" and child:IsA("RemoteEvent") then
+                    afkRemote = child
+                    break
+                end
+            end
+        end)
+    end
+    if not afkRemote or not afkRemote:IsA("RemoteEvent") then
+        Win:Notify("Hop", "AntiAFK remote not found.", 4, "error")
+        return
+    end
+    Win:Status("Server hopping…")
+    Win:Notify("Hop", "Teleporting to new reserved server…", 3, "success")
+    pcall(function() afkRemote:FireServer() end)
+end)
+
+
 local TSystem = Win:Tab("⚙", "System")
 TSystem:Section("Session")
 TSystem:Label("Auto re-exec (AniPixels-style): queues on load + right before TeleportService. Not after full disconnect — use executor auto-exec.")
@@ -8573,9 +9097,12 @@ task.defer(function()
     if rotatingShopToggleRef then
         rotatingShopToggleRef.Set(saved.autoBuyRotatingShop == true)
     end
+    if autoBuyFoodToggleRef and type(autoBuyFoodToggleRef.Set) == "function" then
+        autoBuyFoodToggleRef.Set(saved.autoBuyFood == true)
+    end
     if rotatingShopDelaySliderRef and type(rotatingShopDelaySliderRef.Set) == "function" then
         pcall(function()
-            rotatingShopDelaySliderRef.Set(math.clamp(tonumber(saved.rotatingShopBuyDelaySec) or 1.05, 0.1, 1.5), false)
+            rotatingShopDelaySliderRef.Set(math.clamp(tonumber(saved.rotatingShopBuyDelaySec) or 0.15, 0.05, 1.5), false)
         end)
     end
     if extraRefs.shopAutoDetectKeyToggleRef and type(extraRefs.shopAutoDetectKeyToggleRef.Set) == "function" then
@@ -8586,6 +9113,9 @@ task.defer(function()
     end
     if statRerollToggleRef then
         statRerollToggleRef.Set(saved.autoStatReroll == true)
+    end
+    if statRerollSmartLockToggleRef then
+        statRerollSmartLockToggleRef.Set(saved.statRerollSmartLock ~= false)
     end
     if traitRerollToggleRef then
         traitRerollToggleRef.Set(saved.autoTraitReroll == true)
@@ -8619,6 +9149,18 @@ task.defer(function()
     end
     if queueToggleRef then
         queueToggleRef.Set(saved.queueOnTeleport ~= false)
+    end
+    if focusFireToggleRef then
+        focusFireToggleRef.Set(saved.autoFocusFire == true)
+    end
+    if autoSpecialToggleRef then
+        autoSpecialToggleRef.Set(saved.autoSpecialAll == true)
+    end
+    if unitSpeedBoostToggleRef then
+        unitSpeedBoostToggleRef.Set(saved.unitSpeedBoost == true)
+    end
+    if unitSpeedMultiplierSliderRef then
+        unitSpeedMultiplierSliderRef.Set(saved.unitSpeedMultiplier or 150, false)
     end
     if (saved.autoClaimAchievements or saved.autoClaimDaily) then
         task.defer(restartQuestAutoClaimLoop)
