@@ -126,8 +126,8 @@ local function loadConfig()
         playerGodMode = false,
         autoFocusFire = false,
         autoSpecialAll = false,
-        unitSpeedBoost = false,
-        unitSpeedMultiplier = 150,
+        specialsBossOnly = false,
+        forceSpecials = false,
     }
     if not readfile then
         return defaults
@@ -217,8 +217,8 @@ local function loadConfig()
         { "playerGodMode",          "bool" },
         { "autoFocusFire",          "bool" },
         { "autoSpecialAll",         "bool" },
-        { "unitSpeedBoost",         "bool" },
-        { "unitSpeedMultiplier",    "intClamp:50:500" },
+        { "specialsBossOnly",       "bool" },
+        { "forceSpecials",          "bool" },
     }
 
     for _, fd in ipairs(FIELDS) do
@@ -5816,8 +5816,8 @@ local claimUnitDexIntervalInputRef
 local playerTabRefs = {}
 local focusFireToggleRef
 local autoSpecialToggleRef
-local unitSpeedBoostToggleRef
-local unitSpeedMultiplierSliderRef
+local specialsBossOnlyToggleRef
+local forceSpecialsToggleRef
 
 local function getSelectedDropdownValue(ref)
     if not ref or type(ref.Get) ~= "function" then
@@ -6052,7 +6052,7 @@ local function persistAllWriteNow()
             end
             return normalizeStatTierToken(v)
         end)(),
-        statRerollSmartLock = (statRerollSmartLockToggleRef and statRerollSmartLockToggleRef.Get() or saved.statRerollSmartLock) == true,
+        statRerollSmartLock = persistToggleBool(statRerollSmartLockToggleRef, saved.statRerollSmartLock ~= false),
         statRerollMaxRolls = math.max(
             0,
             math.floor(tonumber(statRerollMaxRollsInputRef and statRerollMaxRollsInputRef.Get() or saved.statRerollMaxRolls) or 0)
@@ -6149,11 +6149,8 @@ local function persistAllWriteNow()
         end)(),
         autoFocusFire = persistToggleBool(focusFireToggleRef, saved.autoFocusFire == true),
         autoSpecialAll = persistToggleBool(autoSpecialToggleRef, saved.autoSpecialAll == true),
-        unitSpeedBoost = persistToggleBool(unitSpeedBoostToggleRef, saved.unitSpeedBoost == true),
-        unitSpeedMultiplier = math.clamp(
-            tonumber(unitSpeedMultiplierSliderRef and unitSpeedMultiplierSliderRef.Get() or saved.unitSpeedMultiplier) or 150,
-            50, 500
-        ),
+        specialsBossOnly = persistToggleBool(specialsBossOnlyToggleRef, saved.specialsBossOnly == true),
+        forceSpecials = persistToggleBool(forceSpecialsToggleRef, saved.forceSpecials == true),
     })
     pcall(function()
         if not readfile then
@@ -6236,7 +6233,8 @@ local G = {
     lastQueueStateHint = 0,
     focusFire = 0,
     autoSpecial = 0,
-    unitSpeed = 0,
+    forceSpecials = 0,
+    specialsBossOnlyFlag = saved.specialsBossOnly == true,
 }
 
 -- ==================== AUTO BONUS CHESTS ====================
@@ -6700,7 +6698,71 @@ local function wireFuseUnitDropdowns(unitsTab)
 end
 
 TBattle:Section("Combat boost")
-TBattle:Label("Focus fire = all units target 1 enemy · Auto special = abilities fire on cooldown · Speed = faster walk between enemies")
+TBattle:Label("Focus fire = all units target 1 enemy · Auto special = abilities fire on cooldown")
+
+local function _isEnemyBossUnit(model)
+    if not model or not model:IsA("Model") then
+        return false
+    end
+    if model:GetAttribute("IsBoss") == true then
+        return true
+    end
+    if model:GetAttribute("Boss") == true then
+        return true
+    end
+    local n = model.Name
+    if type(n) == "string" and n:lower():find("boss", 1, true) then
+        return true
+    end
+    return false
+end
+
+local function _findAliveEnemyBosses(unitsFolder, myTeam)
+    local bosses = {}
+    if not unitsFolder then
+        return bosses
+    end
+    for _, model in ipairs(unitsFolder:GetChildren()) do
+        if not model:IsA("Model") or not model.PrimaryPart then
+            continue
+        end
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then
+            continue
+        end
+        local team = model:GetAttribute("Team") or model:GetAttribute("TeamNum")
+        if team == myTeam or model:GetAttribute("Peaceful") then
+            continue
+        end
+        if _isEnemyBossUnit(model) then
+            bosses[#bosses + 1] = model
+        end
+    end
+    return bosses
+end
+
+local function _pickBossNearestToMyUnits(bosses, myUnits)
+    if #bosses == 0 then
+        return nil
+    end
+    if #myUnits == 0 then
+        return bosses[1]
+    end
+    local center = Vector3.new(0, 0, 0)
+    for _, u in ipairs(myUnits) do
+        center = center + u.PrimaryPart.Position
+    end
+    center = center / #myUnits
+    local best, bestd = bosses[1], math.huge
+    for _, b in ipairs(bosses) do
+        local d = (b.PrimaryPart.Position - center).Magnitude
+        if d < bestd then
+            bestd = d
+            best = b
+        end
+    end
+    return best
+end
 
 focusFireToggleRef = TBattle:Toggle("Focus fire (auto-target)", "Fires SetManualTarget every 0.5s — all your units attack the nearest enemy", saved.autoFocusFire, function(on)
     G.focusFire = G.focusFire + 1
@@ -6769,31 +6831,33 @@ autoSpecialToggleRef = TBattle:Toggle("Auto special (all units)", "Enables autoS
     if on then
         Win:Status("Auto special ON")
         spawnTracked(function()
-            local profileMod = nil
-            pcall(function() profileMod = requireSystemsChildModule("Profile") end)
+            local autoModeRem = nil
+            pcall(function()
+                autoModeRem = game:GetService("ReplicatedStorage").Systems.Profile.SetUnitAutoMode
+            end)
             while g == G.autoSpecial and bonusChestUiAlive(UI_RUN_GEN) do
+                local bossOnly = G.specialsBossOnlyFlag == true
+                local delaySec = bossOnly and 0.25 or 3
                 pcall(function()
+                    if not autoModeRem then
+                        return
+                    end
                     local unitsFolder = workspace:FindFirstChild("Units")
                     if not unitsFolder then return end
+                    local myTeam = LP:GetAttribute("TeamNum") or 1
+                    local enableAuto = true
+                    if bossOnly then
+                        enableAuto = #_findAliveEnemyBosses(unitsFolder, myTeam) > 0
+                    end
                     for _, model in ipairs(unitsFolder:GetChildren()) do
                         if not model:IsA("Model") then continue end
                         if model:GetAttribute("OwnerName") ~= LP.Name then continue end
                         local hum = model:FindFirstChildOfClass("Humanoid")
                         if not hum or hum.Health <= 0 then continue end
-                        if profileMod and type(profileMod.SetUnitAutoMode) == "function" then
-                            pcall(function() profileMod:SetUnitAutoMode(LP, model, true) end)
-                        else
-                            local rem = nil
-                            pcall(function()
-                                rem = game:GetService("ReplicatedStorage").Systems.Profile.SetUnitAutoMode
-                            end)
-                            if rem then
-                                pcall(function() rem:FireServer(model, true) end)
-                            end
-                        end
+                        pcall(function() autoModeRem:FireServer(model, enableAuto) end)
                     end
                 end)
-                task.wait(3)
+                task.wait(delaySec)
             end
         end)
     else
@@ -6802,104 +6866,65 @@ autoSpecialToggleRef = TBattle:Toggle("Auto special (all units)", "Enables autoS
     persistAll()
 end)
 
-unitSpeedBoostToggleRef = TBattle:Toggle("Unit speed boost", "Forces high WalkSpeed + pushes units toward enemies with BodyVelocity", saved.unitSpeedBoost, function(on)
-    G.unitSpeed = G.unitSpeed + 1
-    local g = G.unitSpeed
-    if on then
-        local spd = math.clamp(tonumber(saved.unitSpeedMultiplier) or 150, 50, 500)
-        Win:Status(("Unit speed boost ON (%d studs/s)"):format(spd))
-        local conn
-        conn = addConn(game:GetService("RunService").Heartbeat:Connect(function()
-            if g ~= G.unitSpeed or not bonusChestUiAlive(UI_RUN_GEN) then
-                pcall(function() conn:Disconnect() end)
-                return
-            end
-            local curSpd = 150
-            if unitSpeedMultiplierSliderRef then
-                curSpd = math.clamp(tonumber(unitSpeedMultiplierSliderRef.Get()) or 150, 50, 500)
-            end
-            pcall(function()
-                local unitsFolder = workspace:FindFirstChild("Units")
-                if not unitsFolder then return end
-                local myTeam = LP:GetAttribute("TeamNum") or 1
-                local enemyPositions = {}
-                for _, model in ipairs(unitsFolder:GetChildren()) do
-                    if not model:IsA("Model") or not model.PrimaryPart then continue end
-                    local hum = model:FindFirstChildOfClass("Humanoid")
-                    if not hum or hum.Health <= 0 then continue end
-                    local team = model:GetAttribute("Team") or model:GetAttribute("TeamNum")
-                    if team ~= myTeam and not model:GetAttribute("Peaceful") then
-                        enemyPositions[#enemyPositions + 1] = model.PrimaryPart.Position
-                    end
-                end
-                for _, model in ipairs(unitsFolder:GetChildren()) do
-                    if model:GetAttribute("OwnerName") ~= LP.Name then continue end
-                    if not model:IsA("Model") or not model.PrimaryPart then continue end
-                    local hum = model:FindFirstChildOfClass("Humanoid")
-                    if not hum or hum.Health <= 0 then continue end
-                    hum.WalkSpeed = curSpd
-                    if #enemyPositions > 0 then
-                        local root = model.PrimaryPart
-                        local bestPos, bestDist = nil, math.huge
-                        for _, ep in ipairs(enemyPositions) do
-                            local d = (ep - root.Position).Magnitude
-                            if d < bestDist then
-                                bestDist = d
-                                bestPos = ep
-                            end
-                        end
-                        if bestPos and bestDist > 3 then
-                            local dir = (bestPos - root.Position).Unit
-                            local bv = root:FindFirstChild("_SpeedBoostBV")
-                            if not bv then
-                                bv = Instance.new("BodyVelocity")
-                                bv.Name = "_SpeedBoostBV"
-                                bv.MaxForce = Vector3.new(1e5, 0, 1e5)
-                                bv.P = 1e4
-                                bv.Parent = root
-                            end
-                            bv.Velocity = dir * curSpd
-                        else
-                            local bv = root:FindFirstChild("_SpeedBoostBV")
-                            if bv then bv:Destroy() end
-                        end
-                    end
-                end
-            end)
-        end))
-    else
-        pcall(function()
-            local unitsFolder = workspace:FindFirstChild("Units")
-            if unitsFolder then
-                for _, model in ipairs(unitsFolder:GetChildren()) do
-                    if model:GetAttribute("OwnerName") ~= LP.Name then continue end
-                    pcall(function()
-                        local root = model.PrimaryPart
-                        if root then
-                            local bv = root:FindFirstChild("_SpeedBoostBV")
-                            if bv then bv:Destroy() end
-                        end
-                    end)
-                end
-            end
-        end)
-        Win:Status("Unit speed boost OFF")
-    end
+specialsBossOnlyToggleRef = TBattle:Toggle("Specials: bosses only", "When ON: only while an enemy with IsBoss (or name contains Boss) exists · Profile.SetUnitAutoMode via FireServer", saved.specialsBossOnly, function(on)
+    G.specialsBossOnlyFlag = on == true
     persistAll()
 end)
 
-unitSpeedMultiplierSliderRef = TBattle:Slider(
-    "Unit speed (studs/s)",
-    "WalkSpeed + BodyVelocity push toward nearest enemy (50–500)",
-    {
-        min = 50,
-        max = 500,
-        default = math.clamp(tonumber(saved.unitSpeedMultiplier) or 150, 50, 500),
-    },
-    function()
-        persistAll()
+forceSpecialsToggleRef = TBattle:Toggle("Force specials on target", "Fires RequestSpecialAttack every 0.3s for each unit — specials always hit the focused enemy (use with Focus fire)", saved.forceSpecials, function(on)
+    G.forceSpecials = G.forceSpecials + 1
+    local g = G.forceSpecials
+    if on then
+        Win:Status("Force specials ON")
+        spawnTracked(function()
+            local specialRemote = nil
+            local setTargetRemote = nil
+            pcall(function()
+                local sys = game:GetService("ReplicatedStorage"):FindFirstChild("Systems")
+                local units = sys and sys:FindFirstChild("Units")
+                specialRemote = units and units:FindFirstChild("RequestSpecialAttack")
+                setTargetRemote = units and units:FindFirstChild("SetManualTarget")
+            end)
+            if not specialRemote then
+                Win:Notify("Combat", "RequestSpecialAttack remote not found.", 4, "error")
+                return
+            end
+            while g == G.forceSpecials and bonusChestUiAlive(UI_RUN_GEN) do
+                pcall(function()
+                    local unitsFolder = workspace:FindFirstChild("Units")
+                    if not unitsFolder then return end
+                    local myTeam = LP:GetAttribute("TeamNum") or 1
+                    local bossOnly = G.specialsBossOnlyFlag == true
+                    local myUnits = {}
+                    for _, model in ipairs(unitsFolder:GetChildren()) do
+                        if not model:IsA("Model") or not model.PrimaryPart then continue end
+                        if model:GetAttribute("OwnerName") ~= LP.Name then continue end
+                        local hum = model:FindFirstChildOfClass("Humanoid")
+                        if not hum or hum.Health <= 0 then continue end
+                        myUnits[#myUnits + 1] = model
+                    end
+                    if bossOnly then
+                        local bosses = _findAliveEnemyBosses(unitsFolder, myTeam)
+                        if #bosses == 0 then
+                            return
+                        end
+                        local bossPick = _pickBossNearestToMyUnits(bosses, myUnits)
+                        if bossPick and setTargetRemote then
+                            pcall(function() setTargetRemote:FireServer(bossPick) end)
+                        end
+                    end
+                    for _, model in ipairs(myUnits) do
+                        pcall(function() specialRemote:InvokeServer(model) end)
+                    end
+                end)
+                task.wait(0.3)
+            end
+        end)
+    else
+        Win:Status("Force specials OFF")
     end
-)
+    persistAll()
+end)
 
 local TUnits = Win:Tab("👥", "Units")
 TUnits:Section("Unit fusion")
@@ -9088,6 +9113,9 @@ task.defer(function()
     if fuseToggleRef then
         fuseToggleRef.Set(saved.autoFuseUnits == true)
     end
+    if fuseExploitToggleRef and type(fuseExploitToggleRef.Set) == "function" then
+        fuseExploitToggleRef.Set(saved.fuseExploit ~= false)
+    end
     if summonToggleRef then
         summonToggleRef.Set(saved.autoSummon == true)
     end
@@ -9096,6 +9124,18 @@ task.defer(function()
     end
     if rotatingShopToggleRef then
         rotatingShopToggleRef.Set(saved.autoBuyRotatingShop == true)
+    end
+    if sellRareToggleRef and type(sellRareToggleRef.Set) == "function" then
+        sellRareToggleRef.Set(saved.autoSellRare == true)
+    end
+    if sellEpicToggleRef and type(sellEpicToggleRef.Set) == "function" then
+        sellEpicToggleRef.Set(saved.autoSellEpic == true)
+    end
+    if sellLegendaryToggleRef and type(sellLegendaryToggleRef.Set) == "function" then
+        sellLegendaryToggleRef.Set(saved.autoSellLegendary == true)
+    end
+    if sellMythicToggleRef and type(sellMythicToggleRef.Set) == "function" then
+        sellMythicToggleRef.Set(saved.autoSellMythic == true)
     end
     if autoBuyFoodToggleRef and type(autoBuyFoodToggleRef.Set) == "function" then
         autoBuyFoodToggleRef.Set(saved.autoBuyFood == true)
@@ -9116,6 +9156,18 @@ task.defer(function()
     end
     if statRerollSmartLockToggleRef then
         statRerollSmartLockToggleRef.Set(saved.statRerollSmartLock ~= false)
+    end
+    if statRerollLockAtkToggleRef and type(statRerollLockAtkToggleRef.Set) == "function" then
+        statRerollLockAtkToggleRef.Set(saved.statRerollLockAttack == true)
+    end
+    if statRerollLockHpToggleRef and type(statRerollLockHpToggleRef.Set) == "function" then
+        statRerollLockHpToggleRef.Set(saved.statRerollLockHealth == true)
+    end
+    if statRerollLockCdToggleRef and type(statRerollLockCdToggleRef.Set) == "function" then
+        statRerollLockCdToggleRef.Set(saved.statRerollLockCooldown == true)
+    end
+    if statRerollLockSpdToggleRef and type(statRerollLockSpdToggleRef.Set) == "function" then
+        statRerollLockSpdToggleRef.Set(saved.statRerollLockSpeed == true)
     end
     if traitRerollToggleRef then
         traitRerollToggleRef.Set(saved.autoTraitReroll == true)
@@ -9156,11 +9208,11 @@ task.defer(function()
     if autoSpecialToggleRef then
         autoSpecialToggleRef.Set(saved.autoSpecialAll == true)
     end
-    if unitSpeedBoostToggleRef then
-        unitSpeedBoostToggleRef.Set(saved.unitSpeedBoost == true)
+    if specialsBossOnlyToggleRef then
+        specialsBossOnlyToggleRef.Set(saved.specialsBossOnly == true)
     end
-    if unitSpeedMultiplierSliderRef then
-        unitSpeedMultiplierSliderRef.Set(saved.unitSpeedMultiplier or 150, false)
+    if forceSpecialsToggleRef then
+        forceSpecialsToggleRef.Set(saved.forceSpecials == true)
     end
     if (saved.autoClaimAchievements or saved.autoClaimDaily) then
         task.defer(restartQuestAutoClaimLoop)
